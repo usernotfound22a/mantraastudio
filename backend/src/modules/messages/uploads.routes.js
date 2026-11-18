@@ -20,10 +20,11 @@ import multer from 'multer';
 import { randomUUID } from 'crypto';
 import path from 'path';
 import fs from 'fs';
-import { fileURLToPath } from 'url';
+import { tmpdir } from 'os';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-export const UPLOAD_DIR = path.join(__dirname, '../../../uploads');
+export const UPLOAD_DIR = process.env.VERCEL
+  ? path.join(tmpdir(), 'socialhub-uploads')
+  : path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../uploads');
 if (!fs.existsSync(UPLOAD_DIR)) {
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 }
