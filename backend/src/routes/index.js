@@ -12,7 +12,7 @@ import workspaceRoutes from '../modules/workspaces/workspaces.routes.js';
 import channelRoutes from '../modules/channels/channels.routes.js';
 import conversationRoutes from '../modules/conversations/conversations.routes.js';
 import faqRoutes from '../modules/faqs/faqs.routes.js';
-import uploadRoutes from '../modules/uploads/uploads.routes.js';
+import uploadRoutes from '../modules/messages/uploads.routes.js';
 import analyticsRoutes from '../modules/analytics/analytics.routes.js';
 import billingRoutes from '../modules/billing/billing.routes.js';
 import apiKeyRoutes from '../modules/apikeys/apikeys.routes.js';

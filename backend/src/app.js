@@ -23,7 +23,7 @@ import apiRoutes from './routes/index.js';
 import v1Routes from './modules/apikeys/v1.routes.js';
 import webhookRoutes from './modules/webhooks/webhooks.routes.js';
 import widgetRoutes from './modules/widget/widget.routes.js';
-import { UPLOAD_DIR } from './modules/uploads/uploads.routes.js';
+import { UPLOAD_DIR } from './modules/messages/uploads.routes.js';
 import { isMetaConfigured } from './services/meta-settings.service.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
