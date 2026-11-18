@@ -1,10 +1,10 @@
 import { Router } from 'express';
-import { param } from 'express-validator';
+import { z } from 'zod';
 import { authenticate, loadWorkspace, requireRole } from '../../middleware/auth.js';
-import { validate } from '../../middleware/validation.js';
+import { validate } from '../../middleware/validate.js';
 import { asyncHandler, AppError } from '../../middleware/error.js';
-import { requireMembership } from '../../services/membership.service.js';
-import { queryOne, execute, query } from '../../db/pool.js';
+import { findMembership } from '../../services/membership.service.js';
+import { queryOne, execute } from '../../db/pool.js';
 
 const router = Router({ mergeParams: true });
 
@@ -17,7 +17,7 @@ function getWorkspaceId(req) {
 // ---------------------------------------------------------------------------
 
 import multer from 'multer';
-import { v4 as uuid } from 'crypto';
+import { randomUUID } from 'crypto';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -42,7 +42,7 @@ const upload = multer({
     destination: (req, file, cb) => cb(null, UPLOAD_DIR),
     filename: (req, file, cb) => {
       const ext = path.extname(file.originalname).slice(0, 10);
-      cb(null, `${uuid()}${ext}`);
+      cb(null, `${randomUUID()}${ext}`);
     },
   }),
   limits: { fileSize: MAX_FILE_SIZE, files: 5 },
@@ -62,7 +62,8 @@ router.post(
   upload.array('files', 5),
   asyncHandler(async (req, res) => {
     const workspaceId = getWorkspaceId(req);
-    await requireMembership(req.user.id, workspaceId);
+    const membership = await findMembership(req.user.id, workspaceId);
+    if (!membership || membership.status !== 'active') throw AppError.forbidden('Workspace membership required');
 
     if (!req.files?.length) {
       throw AppError.badRequest('No files were uploaded');
@@ -88,12 +89,12 @@ router.patch(
   authenticate,
   loadWorkspace,
   requireRole('admin', 'owner'),
-  validate([
-    param('id').isInt().toInt(),
-  ]),
+  validate({ params: z.object({ id: z.coerce.number().int().positive() }) }),
   asyncHandler(async (req, res) => {
     const workspaceId = getWorkspaceId(req);
-    await requireMembership(req.user.id, workspaceId);
+    const membership = await findMembership(req.user.id, workspaceId);
+    if (!membership || membership.status !== 'active') throw AppError.forbidden('Workspace membership required');
+
     const conv = await queryOne('SELECT id FROM conversations WHERE id = ? AND workspace_id = ?', [
       req.params.id,
       workspaceId,
