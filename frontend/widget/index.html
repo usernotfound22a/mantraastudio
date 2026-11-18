@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Acme - widget test page</title>
+    <style>
+      /* Deliberately plain: this stands in for a customer's own site, so if the
+         widget breaks here it will break on a real page too. */
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+        color: #1e293b;
+        background: #fff;
+      }
+      header {
+        padding: 64px 24px;
+        text-align: center;
+        background: linear-gradient(135deg, #4f46e5, #7c3aed);
+        color: #fff;
+      }
+      header h1 { margin: 0 0 8px; font-size: 40px; letter-spacing: -0.02em; }
+      header p { margin: 0; opacity: 0.9; }
+      main { max-width: 680px; margin: 0 auto; padding: 40px 24px 120px; }
+      h2 { font-size: 20px; margin-top: 32px; }
+      code { background: #f1f5f9; padding: 2px 6px; border-radius: 4px; font-size: 14px; }
+      .note {
+        margin-top: 40px;
+        padding: 16px;
+        border-left: 3px solid #6366f1;
+        background: #eef2ff;
+        border-radius: 0 8px 8px 0;
+        font-size: 14px;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Acme Outdoors</h1>
+      <p>Tents, stoves and things that break in the wind.</p>
+    </header>
+
+    <main>
+      <h2>A stand-in for a customer's website</h2>
+      <p>
+        This page exists to test the widget the way a real visitor would see it: a normal page, no
+        dashboard, no logged-in session. The launcher in the bottom-right corner is the live widget.
+      </p>
+
+      <h2>How to test a full round trip</h2>
+      <ol>
+        <li>Open the dashboard in another tab and go to the inbox.</li>
+        <li>Open the widget here and ask something the knowledge base can answer.</li>
+        <li>Watch the thread appear in the dashboard, and reply from the dashboard side.</li>
+        <li>Come back here: the reply shows up on the next poll, within a couple of seconds.</li>
+      </ol>
+
+      <h2>Try the assistant</h2>
+      <p>
+        Ask a question that is in the knowledge base to see the AI answer, then ask something it
+        cannot know ("what is the warranty on the 40L pack?") to watch it hand over to a human and
+        record the gap.
+      </p>
+
+      <div class="note">
+        The key below is baked into this page for local testing. In production the widget is loaded
+        with <code>&lt;script src=".../widget/socialhub.js" data-key="..."&gt;</code> instead.
+      </div>
+    </main>
+
+    <script>
+      // Local dev only: no key is baked into this page, so it works for any
+      // workspace. `?api=` lets the dashboard preview point the widget at the
+      // API even though the iframe itself is served from the API origin.
+      (function () {
+        var params = new URLSearchParams(location.search);
+        var key = params.get('key');
+        if (!key) {
+          console.warn('[demo] add ?key=<widgetKey> to test the widget');
+          return;
+        }
+        window.SOCIALHUB_API = params.get('api') || location.origin + '/api';
+        var script = document.createElement('script');
+        script.src = new URL('socialhub.js', location.href).href + '?v=' + Date.now();
+        script.setAttribute('data-key', key);
+        document.body.appendChild(script);
+      })();
+    </script>
+  </body>
+</html>

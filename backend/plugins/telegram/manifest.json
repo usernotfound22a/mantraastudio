@@ -1,0 +1,23 @@
+{
+  "name": "Telegram",
+  "version": "1.0.0",
+  "type": "telegram",
+  "label": "Telegram",
+  "description": "Telegram bot channel via the Bot API.",
+  "family": "chat",
+  "vendor": "SocialHub (example)",
+  "homepage": null,
+  "requiresSignature": false,
+  "capabilities": {
+    "attachments": true,
+    "readReceipts": false,
+    "typingIndicator": true,
+    "proactiveMessaging": true,
+    "mediaUpload": false
+  },
+  "requiredConfig": ["botToken"],
+  "configSchema": [
+    { "key": "botToken", "label": "Bot token", "type": "password", "required": true },
+    { "key": "botUsername", "label": "Bot username", "type": "string", "required": false }
+  ]
+}
