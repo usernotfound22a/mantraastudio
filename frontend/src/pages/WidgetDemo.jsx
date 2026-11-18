@@ -30,7 +30,7 @@ export default function WidgetDemo() {
 
   const apiBase = useMemo(() => {
     if (import.meta.env.VITE_API_URL) return import.meta.env.VITE_API_URL;
-    return 'http://localhost:4000/api';
+    return `${window.location.origin}/api`;
   }, []);
 
   // The harness page is served BY the API (it sits next to socialhub.js), so the
