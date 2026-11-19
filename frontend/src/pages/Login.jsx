@@ -36,7 +36,7 @@ export default function Login() {
       {/* Marketing panel - hidden on small screens so the form gets the space. */}
       <div className="hidden w-1/2 flex-col justify-between bg-slate-900 p-10 lg:flex">
         <div className="flex items-center gap-3 text-white">
-          <img src="/socialhub-icon.png" alt="" className="h-11 w-11 shrink-0 rounded-xl object-contain" />
+          <img src="/mantraastudio-logo.png" alt="" className="h-11 w-11 shrink-0 rounded-xl object-contain" />
           <span className="text-xl font-semibold tracking-tight">Mantraa Studio</span>
         </div>
 
