@@ -20,7 +20,16 @@
  * with a next_attempt_at before the HTTP call is made).
  */
 import crypto from 'node:crypto';
-import { execute, query, queryOne, closePool } from '../db/pool.js';
+import {
+  deleteRows,
+  getAdminClient,
+  insertRow,
+  callRpc,
+  selectOne,
+  selectRows,
+  updateRows,
+  withSupabaseClient,
+} from '../db/supabase.js';
 import { env } from '../config/env.js';
 import { childLogger } from '../config/logger.js';
 import { AppError } from '../middleware/error.js';
@@ -55,10 +64,9 @@ function backoffMs(attempt) {
 // ------------------------------------------------------------- endpoints
 
 export async function listEndpoints(workspaceId) {
-  const rows = await query(
-    'SELECT * FROM webhook_endpoints WHERE workspace_id = ? ORDER BY created_at DESC',
-    [workspaceId],
-  );
+  const rows = await selectRows('webhook_endpoints', '*', { workspace_id: workspaceId }, {
+    order: [{ column: 'created_at', ascending: false }],
+  });
   return rows.map(mapEndpoint);
 }
 
@@ -67,19 +75,19 @@ export async function createEndpoint({ workspaceId, url, events, description = n
   const wanted = assertValidEvents(events);
 
   const secret = crypto.randomBytes(32).toString('hex');
-  const result = await execute(
-    `INSERT INTO webhook_endpoints (workspace_id, url, events, signing_secret, description)
-     VALUES (?, ?, ?, ?, ?)`,
-    // Stored encrypted: we must re-sign every delivery, so the secret has to be
-    // recoverable, which rules out one-way hashing.
-    [workspaceId, url, JSON.stringify(wanted), encryptSecret(secret), description],
-  );
-
-  return { endpoint: await getEndpoint(workspaceId, result.insertId), signingSecret: secret };
+  // Stored encrypted: we must re-sign every delivery, so the secret has to be recoverable.
+  const row = await insertRow('webhook_endpoints', {
+    workspace_id: workspaceId,
+    url,
+    events: wanted,
+    signing_secret: encryptSecret(secret),
+    description,
+  });
+  return { endpoint: mapEndpoint(row), signingSecret: secret };
 }
 
 export async function getEndpoint(workspaceId, id) {
-  const row = await queryOne('SELECT * FROM webhook_endpoints WHERE id = ? AND workspace_id = ?', [id, workspaceId]);
+  const row = await selectOne('webhook_endpoints', '*', { id, workspace_id: workspaceId });
   if (!row) throw AppError.notFound('Webhook endpoint not found');
   return mapEndpoint(row);
 }
@@ -90,60 +98,49 @@ export async function updateEndpoint(workspaceId, id, { url, events, status, des
   assertValidUrl(nextUrl);
   const nextEvents = events ? assertValidEvents(events) : existing.events;
 
-  await execute(
-    `UPDATE webhook_endpoints
-        SET url = ?, events = ?, status = ?, description = ?,
-            disabled_reason = NULL
-      WHERE id = ? AND workspace_id = ?`,
-    [nextUrl, JSON.stringify(nextEvents), status ?? existing.status, description ?? existing.description, id, workspaceId],
-  );
+  await updateRows('webhook_endpoints', {
+    url: nextUrl,
+    events: nextEvents,
+    status: status ?? existing.status,
+    description: description ?? existing.description,
+    disabled_reason: null,
+  }, { id, workspace_id: workspaceId });
   return getEndpoint(workspaceId, id);
 }
 
 /** Re-enables a disabled endpoint and clears its failure counter. */
 export async function enableEndpoint(workspaceId, id) {
-  await execute(
-    `UPDATE webhook_endpoints
-        SET status = 'active', failure_count = 0, disabled_reason = NULL
-      WHERE id = ? AND workspace_id = ?`,
-    [id, workspaceId],
-  );
+  await updateRows('webhook_endpoints', {
+    status: 'active', failure_count: 0, disabled_reason: null,
+  }, { id, workspace_id: workspaceId });
   return getEndpoint(workspaceId, id);
 }
 
 /** Rotation returns the NEW secret immediately; the old one stops working. */
 export async function rotateSecret(workspaceId, id) {
   const secret = crypto.randomBytes(32).toString('hex');
-  const result = await execute(
-    'UPDATE webhook_endpoints SET signing_secret = ? WHERE id = ? AND workspace_id = ?',
-    [encryptSecret(secret), id, workspaceId],
-  );
-  if (!result.affectedRows) throw AppError.notFound('Webhook endpoint not found');
+  const result = await updateRows('webhook_endpoints', { signing_secret: encryptSecret(secret) }, {
+    id, workspace_id: workspaceId,
+  });
+  if (!result.length) throw AppError.notFound('Webhook endpoint not found');
   return { signingSecret: secret };
 }
 
 export async function deleteEndpoint(workspaceId, id) {
-  const result = await execute('DELETE FROM webhook_endpoints WHERE id = ? AND workspace_id = ?', [id, workspaceId]);
-  if (!result.affectedRows) throw AppError.notFound('Webhook endpoint not found');
+  const result = await deleteRows('webhook_endpoints', { id, workspace_id: workspaceId });
+  if (!result.length) throw AppError.notFound('Webhook endpoint not found');
   return { deleted: true };
 }
 
 /** Recent deliveries, newest first, for the dashboard log. */
 export async function listDeliveries(workspaceId, { endpointId, limit = 50 } = {}) {
   const capped = Math.min(Number(limit) || 50, 200);
-  const rows = endpointId
-    ? await query(
-        `SELECT * FROM webhook_deliveries
-          WHERE workspace_id = ? AND endpoint_id = ?
-          ORDER BY id DESC LIMIT ${capped}`,
-        [workspaceId, endpointId],
-      )
-    : await query(
-        `SELECT * FROM webhook_deliveries
-          WHERE workspace_id = ?
-          ORDER BY id DESC LIMIT ${capped}`,
-        [workspaceId],
-      );
+  const rows = await selectRows(
+    'webhook_deliveries',
+    '*',
+    endpointId ? { workspace_id: workspaceId, endpoint_id: endpointId } : { workspace_id: workspaceId },
+    { order: [{ column: 'id', ascending: false }], limit: capped },
+  );
   return rows.map(mapDelivery);
 }
 
@@ -162,41 +159,12 @@ export async function dispatchEvent(workspaceId, event, payload) {
     return 0;
   }
 
-  const endpoints = await query(
-    "SELECT id FROM webhook_endpoints WHERE workspace_id = ? AND status = 'active'",
-    [workspaceId],
-  );
-  if (!endpoints.length) return 0;
-
-  const body = JSON.stringify({
-    event,
-    createdAt: new Date().toISOString(),
-    data: payload,
+  const queued = await callRpc('queue_webhook_event', {
+    p_workspace_id: workspaceId,
+    p_event: event,
+    p_payload: payload,
+    p_max_attempts: env.WEBHOOK_MAX_ATTEMPTS,
   });
-
-  let queued = 0;
-  for (const { id: endpointId } of endpoints) {
-    // Only endpoints subscribed to this event, and not a duplicate sequence.
-    const subscribed = await queryOne(
-      'SELECT 1 AS ok FROM webhook_endpoints WHERE id = ? AND JSON_CONTAINS(events, JSON_QUOTE(?))',
-      [endpointId, event],
-    );
-    if (!subscribed) continue;
-
-    const seqRow = await queryOne(
-      'SELECT COALESCE(MAX(sequence), 0) + 1 AS next FROM webhook_deliveries WHERE endpoint_id = ?',
-      [endpointId],
-    );
-
-    await execute(
-      // max_attempts comes from env so WEBHOOK_MAX_ATTEMPTS is actually honoured
-        // rather than silently falling back to the column default.
-        `INSERT INTO webhook_deliveries (endpoint_id, workspace_id, event, payload, sequence, status, attempt, max_attempts, next_attempt_at)
-       VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, NOW())`,
-      [endpointId, workspaceId, event, body, seqRow.next, env.WEBHOOK_MAX_ATTEMPTS],
-    );
-    queued += 1;
-  }
 
   if (queued) log.debug({ workspaceId, event, queued }, 'webhook event queued');
   return queued;
@@ -232,17 +200,16 @@ let workerTimer = null;
 
 /** Attempts one delivery. Exported so the self-test can drive it directly. */
 export async function attemptDelivery(deliveryId) {
-const delivery = await queryOne('SELECT * FROM webhook_deliveries WHERE id = ?', [deliveryId]);
+const delivery = await selectOne('webhook_deliveries', '*', { id: deliveryId });
     // 'processing' means processDueDeliveries already claimed it for us;
     // 'pending' still works when a test drives attemptDelivery directly.
     if (!delivery || !['pending', 'processing'].includes(delivery.status)) return null;
 
-  const endpoint = await queryOne('SELECT * FROM webhook_endpoints WHERE id = ?', [delivery.endpoint_id]);
+  const endpoint = await selectOne('webhook_endpoints', '*', { id: delivery.endpoint_id });
   if (!endpoint || endpoint.status !== 'active') {
-    await execute("UPDATE webhook_deliveries SET status = 'exhausted', error = ? WHERE id = ?", [
-      'endpoint disabled or deleted',
-      delivery.id,
-    ]);
+    await updateRows('webhook_deliveries', { status: 'exhausted', error: 'endpoint disabled or deleted' }, {
+      id: delivery.id,
+    });
     return null;
   }
 
@@ -260,10 +227,9 @@ const delivery = await queryOne('SELECT * FROM webhook_deliveries WHERE id = ?',
         })();
   }
   if (!secret) {
-    await execute("UPDATE webhook_deliveries SET status = 'exhausted', error = ? WHERE id = ?", [
-      'signing secret is unreadable',
-      delivery.id,
-    ]);
+    await updateRows('webhook_deliveries', { status: 'exhausted', error: 'signing secret is unreadable' }, {
+      id: delivery.id,
+    });
     return null;
   }
 
@@ -301,54 +267,41 @@ const delivery = await queryOne('SELECT * FROM webhook_deliveries WHERE id = ?',
   const durationMs = Date.now() - startedAt;
   const succeeded = !error;
 
-  await execute(
-    `UPDATE webhook_deliveries
-        SET status = ?, attempt = ?, response_status = ?, error = ?, duration_ms = ?,
-            delivered_at = IF(? = 1, NOW(), delivered_at),
-            next_attempt_at = ?,
-            claimed_at = NULL
-      WHERE id = ?`,
-    [
-      succeeded ? 'delivered' : attempt >= delivery.max_attempts ? 'exhausted' : 'pending',
-      attempt,
-      responseStatus,
-      error,
-      durationMs,
-      succeeded ? 1 : 0,
-      succeeded ? null : new Date(Date.now() + backoffMs(attempt)),
-      delivery.id,
-    ],
-  );
+  await updateRows('webhook_deliveries', {
+    status: succeeded ? 'delivered' : attempt >= delivery.max_attempts ? 'exhausted' : 'pending',
+    attempt,
+    response_status: responseStatus,
+    error,
+    duration_ms: durationMs,
+    delivered_at: succeeded ? new Date().toISOString() : delivery.delivered_at,
+    next_attempt_at: succeeded ? null : new Date(Date.now() + backoffMs(attempt)).toISOString(),
+    claimed_at: null,
+  }, { id: delivery.id });
 
   if (succeeded) {
-    await execute(
-      'UPDATE webhook_endpoints SET last_status = ?, last_success_at = NOW(), failure_count = 0 WHERE id = ?',
-      [responseStatus, endpoint.id],
-    );
+    await updateRows('webhook_endpoints', {
+      last_status: responseStatus,
+      last_success_at: new Date().toISOString(),
+      failure_count: 0,
+    }, { id: endpoint.id });
   } else {
-    const updated = await execute(
-      'UPDATE webhook_endpoints SET failure_count = failure_count + 1, last_status = ?, last_attempt_at = NOW() WHERE id = ?',
-      [responseStatus, endpoint.id],
-    );
-    if (updated.affectedRows) {
-      const fresh = await queryOne('SELECT failure_count FROM webhook_endpoints WHERE id = ?', [endpoint.id]);
-      if (fresh?.failure_count >= env.WEBHOOK_FAILURE_THRESHOLD) {
-        await execute(
-          `UPDATE webhook_endpoints
-              SET status = 'disabled', disabled_reason = ?
-            WHERE id = ?`,
-          [`disabled after ${fresh.failure_count} consecutive failures`, endpoint.id],
-        );
-        log.warn({ endpointId: endpoint.id, failures: fresh.failure_count }, 'webhook endpoint auto-disabled');
-      }
+    const failures = (endpoint.failure_count ?? 0) + 1;
+    await updateRows('webhook_endpoints', {
+      failure_count: failures,
+      last_status: responseStatus,
+      last_attempt_at: new Date().toISOString(),
+    }, { id: endpoint.id });
+    if (failures >= env.WEBHOOK_FAILURE_THRESHOLD) {
+      await updateRows('webhook_endpoints', {
+        status: 'disabled',
+        disabled_reason: `disabled after ${failures} consecutive failures`,
+      }, { id: endpoint.id });
+      log.warn({ endpointId: endpoint.id, failures }, 'webhook endpoint auto-disabled');
     }
   }
 
   return { success: succeeded, responseStatus, error, attempt };
 }
-
-/** A claim older than this is treated as abandoned (the worker crashed). */
-  const CLAIM_LEASE_SECONDS = 300;
 
   /**
    * Atomically claims one delivery for this process.
@@ -360,25 +313,20 @@ const delivery = await queryOne('SELECT * FROM webhook_deliveries WHERE id = ?',
    * @returns {Promise<boolean>} true when this process now owns the delivery.
    */
   async function claimDelivery(deliveryId) {
-    const result = await execute(
-      `UPDATE webhook_deliveries
-          SET status = 'processing', claimed_at = NOW()
-        WHERE id = ?
-          AND status = 'pending'
-          AND (claimed_at IS NULL OR claimed_at < DATE_SUB(NOW(), INTERVAL ? SECOND))`,
-      [deliveryId, CLAIM_LEASE_SECONDS],
-    );
-    return result.affectedRows === 1;
+    const rows = await updateRows('webhook_deliveries', {
+      status: 'processing', claimed_at: new Date().toISOString(),
+    }, { id: deliveryId, status: 'pending' });
+    return rows.length === 1;
   }
 
   /** Processes every delivery that is due now. */
   export async function processDueDeliveries(limit = 25) {
-    const due = await query(
-      `SELECT id FROM webhook_deliveries
-        WHERE status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= NOW())
-        ORDER BY id ASC LIMIT ?`,
-      [limit],
-    );
+    return withSupabaseClient(getAdminClient(), async () => {
+    const due = await selectRows('webhook_deliveries', 'id', { status: 'pending' }, {
+      order: [{ column: 'id', ascending: true }],
+      limit,
+      or: `next_attempt_at.is.null,next_attempt_at.lte.${new Date().toISOString()}`,
+    });
     let processed = 0;
     for (const { id } of due) {
       try {
@@ -389,15 +337,13 @@ const delivery = await queryOne('SELECT * FROM webhook_deliveries WHERE id = ?',
       } catch (error) {
         log.error({ deliveryId: id, err: error.message }, 'delivery attempt crashed');
         // Never leave a row stuck in 'processing' after a crash here.
-        await execute(
-          `UPDATE webhook_deliveries
-              SET status = 'pending', claimed_at = NULL
-            WHERE id = ? AND status = 'processing'`,
-          [id],
-        ).catch(() => {});
+        await updateRows('webhook_deliveries', {
+          status: 'pending', claimed_at: null,
+        }, { id, status: 'processing' }).catch(() => {});
       }
     }
     return processed;
+    });
   }
 
 /** Starts the background worker. Safe to call once at boot. */
@@ -487,5 +433,3 @@ function mapDelivery(row) {
     deliveredAt: row.delivered_at,
   };
 }
-
-export { closePool };

@@ -23,7 +23,7 @@ import { z } from 'zod';
 import { queryOf, validate } from '../../middleware/validate.js';
 import { AppError, asyncHandler } from '../../middleware/error.js';
 import { publicLimiter } from '../../middleware/rateLimit.js';
-import { query } from '../../db/pool.js';
+import { callRpc } from '../../db/supabase.js';
 import { createAdapterForChannel } from '../../adapters/index.js';
 import { findWebsiteChannelByWidgetKey } from '../../services/channels.service.js';
 import { ingestInboundMessage, mapMessage } from '../../services/conversation.service.js';
@@ -200,18 +200,11 @@ router.get(
 
     // Scoped to this visitor's own conversation: a visitor can never read
     // someone else's thread.
-    const rows = await query(
-      `SELECT m.*, u.full_name AS sender_display_name, u.avatar_url AS sender_display_avatar
-         FROM messages m
-         LEFT JOIN users u ON u.id = m.sender_id
-        JOIN conversations c ON c.id = m.conversation_id
-        WHERE c.channel_id = ?
-          AND c.external_id = ?
-          ${afterId ? 'AND m.id > ?' : ''}
-        ORDER BY m.id ASC
-        LIMIT 100`,
-      afterId ? [channel.id, visitorId, afterId] : [channel.id, visitorId],
-    );
+    const rows = await callRpc('poll_widget_messages', {
+      p_widget_key: key,
+      p_visitor_id: visitorId,
+      p_after_id: afterId ?? 0,
+    });
 
     res.json({
       messages: rows.map(mapMessage),

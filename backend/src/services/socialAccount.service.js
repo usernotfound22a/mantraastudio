@@ -5,7 +5,7 @@
  * encrypted platform tokens separately from the inbox channel rows, without
  * shuffling the present support-focused channel schema.
  */
-import { query, queryOne, execute } from '../db/pool.js';
+import { selectRows, selectOne, insertRow, updateRows } from '../db/supabase.js';
 import { AppError } from '../middleware/error.js';
 import { decryptSecret, encryptSecret } from './crypto.service.js';
 
@@ -29,22 +29,18 @@ export function toPublicSocialAccount(row) {
 }
 
 export async function listSocialAccountsForWorkspace(workspaceId) {
-  const rows = await query(
-    `SELECT * FROM social_accounts WHERE workspace_id = ? ORDER BY status DESC, created_at DESC`,
-    [workspaceId],
-  );
+  const rows = await selectRows('social_accounts', '*', { workspace_id: workspaceId }, {
+    order: [{ column: 'status', ascending: false }, { column: 'created_at', ascending: false }],
+  });
   return rows.map(toPublicSocialAccount);
 }
 
 export async function findSocialAccountByExternalId(workspaceId, platform, externalId) {
-  return queryOne(
-    'SELECT * FROM social_accounts WHERE workspace_id = ? AND platform = ? AND external_id = ? LIMIT 1',
-    [workspaceId, platform, externalId],
-  );
+  return selectOne('social_accounts', '*', { workspace_id: workspaceId, platform, external_id: externalId });
 }
 
 export async function getSocialAccountById(id) {
-  return queryOne('SELECT * FROM social_accounts WHERE id = ? LIMIT 1', [id]);
+  return selectOne('social_accounts', '*', { id });
 }
 
 export function getDecryptedAccessToken(account) {
@@ -80,58 +76,46 @@ export async function upsertSocialAccount({
   const existing = await findSocialAccountByExternalId(workspaceId, platform, externalId);
 
   if (existing) {
-    await execute(
-      `UPDATE social_accounts
-          SET name = ?, avatar_url = ?, encrypted_access_token = ?, token_expires_at = ?, scopes = ?, status = ?, metadata = ?, connected_by = ?
-        WHERE id = ?`,
-      [
-        name,
-        avatarUrl,
-        encryptedToken ?? existing.encrypted_access_token,
-        tokenExpiresAt,
-        JSON.stringify(normalizedScopes),
-        status,
-        JSON.stringify(metadata),
-        connectedBy,
-        existing.id,
-      ],
-    );
+    await updateRows('social_accounts', {
+      name,
+      avatar_url: avatarUrl,
+      encrypted_access_token: encryptedToken ?? existing.encrypted_access_token,
+      token_expires_at: tokenExpiresAt,
+      scopes: normalizedScopes,
+      status,
+      metadata,
+      connected_by: connectedBy,
+    }, { id: existing.id });
     return getSocialAccountById(existing.id);
   }
 
-  const result = await execute(
-    `INSERT INTO social_accounts (
-      workspace_id, platform, external_id, name, avatar_url,
-      encrypted_access_token, token_expires_at, scopes, status, connected_by, metadata
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      workspaceId,
-      platform,
-      externalId,
-      name,
-      avatarUrl,
-      encryptedToken,
-      tokenExpiresAt,
-      JSON.stringify(normalizedScopes),
-      status,
-      connectedBy,
-      JSON.stringify(metadata),
-    ],
-  );
-
-  return getSocialAccountById(result.insertId);
+  return insertRow('social_accounts', {
+    workspace_id: workspaceId,
+    platform,
+    external_id: externalId,
+    name,
+    avatar_url: avatarUrl,
+    encrypted_access_token: encryptedToken,
+    token_expires_at: tokenExpiresAt,
+    scopes: normalizedScopes,
+    status,
+    connected_by: connectedBy,
+    metadata,
+  });
 }
 
 export async function markSocialAccountNeedsReconnect(accountId, reason = 'token expired') {
   const current = await getSocialAccountById(accountId);
   if (!current) return null;
 
-  await execute(
-    `UPDATE social_accounts
-        SET status = 'needs_reconnect', metadata = ?
-      WHERE id = ?`,
-    [JSON.stringify({ ...(current.metadata ?? {}), reconnectReason: reason, lastReconnectCheck: new Date().toISOString() }), accountId],
-  );
+  await updateRows('social_accounts', {
+    status: 'needs_reconnect',
+    metadata: {
+      ...(current.metadata ?? {}),
+      reconnectReason: reason,
+      lastReconnectCheck: new Date().toISOString(),
+    },
+  }, { id: accountId });
 
   return getSocialAccountById(accountId);
 }

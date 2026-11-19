@@ -1,226 +1,214 @@
-/**
- * Analytics (Part 8).
- *
- * Every query here is workspace-scoped in the WHERE clause, never applied after
- * the fact, so one workspace can never see another's numbers. The only inputs
- * are a validated range and the workspace id.
- *
- * The dashboard shows two things that matter for this project:
- *   - where the AI actually saved time (AI resolution rate, handovers, the
- *     questions it could not answer)
- *   - where the humans are slow (first response and resolution time per agent)
- */
-import { query, queryOne } from '../db/pool.js';
+import { selectAllRows } from '../db/supabase.js';
+import { listMembersOfWorkspace } from './membership.service.js';
 
-/** Named ranges keep the API surface small and the SQL injection-free. */
-export const RANGES = {
-  '7d': 7,
-  '30d': 30,
-  '90d': 90,
-};
+export const RANGES = { '7d': 7, '30d': 30, '90d': 90 };
 
 export function resolveRange(range) {
   const days = RANGES[range] ?? RANGES['30d'];
   return { range: RANGES[range] ? range : '30d', days, since: new Date(Date.now() - days * 86400000) };
 }
 
-/** Headline numbers for the dashboard cards. */
-export async function overview(workspaceId, since) {
-  const totals = await queryOne(
-    `SELECT
-        COUNT(*)                                                   AS conversations,
-        SUM(status = 'open')                                       AS open,
-        SUM(status = 'pending')                                    AS pending,
-        SUM(status = 'closed')                                     AS closed,
-        SUM(ai_handover = 1)                                       AS handed_over,
-        SUM(ai_resolved = 1)                                       AS ai_resolved,
-        AVG(NULLIF(first_response_seconds, 0))                    AS avg_first_response,
-        AVG(NULLIF(TIMESTAMPDIFF(SECOND, created_at, resolved_at), 0)) AS avg_resolution_seconds,
-        SUM(ai_message_count)                                      AS ai_messages
-      FROM conversations
-     WHERE workspace_id = ? AND created_at >= ?`,
-    [workspaceId, since],
-  );
-
-  const previous = await queryOne(
-    `SELECT COUNT(*) AS conversations
-       FROM conversations
-      WHERE workspace_id = ? AND created_at >= ? AND created_at < ?`,
-    [workspaceId, new Date(since.getTime() - 30 * 86400000), since],
-  );
-
-  const satisfaction = await queryOne(
-    `SELECT COUNT(*) AS rated, AVG(rating) AS avg_rating
-       FROM message_feedback
-      WHERE workspace_id = ? AND created_at >= ?`,
-    [workspaceId, since],
-  );
-
-  const total = Number(totals.conversations ?? 0);
-  return {
-    conversations: total,
-    open: Number(totals.open ?? 0),
-    pending: Number(totals.pending ?? 0),
-    closed: Number(totals.closed ?? 0),
-    handedOver: Number(totals.handed_over ?? 0),
-    aiResolved: Number(totals.ai_resolved ?? 0),
-    // The headline number for the FYP: what share of threads the AI closed on
-    // its own, with no human involved.
-    aiResolutionRate: total ? round((Number(totals.ai_resolved) / total) * 100, 1) : 0,
-    handoverRate: total ? round((Number(totals.handed_over) / total) * 100, 1) : 0,
-    avgFirstResponseSeconds: totals.avg_first_response === null ? null : Math.round(Number(totals.avg_first_response)),
-    avgResolutionSeconds:
-      totals.avg_resolution_seconds === null ? null : Math.round(Number(totals.avg_resolution_seconds)),
-    aiMessages: Number(totals.ai_messages ?? 0),
-    satisfaction: {
-      rated: Number(satisfaction.rated ?? 0),
-      avgRating: satisfaction.avg_rating === null ? null : round(Number(satisfaction.avg_rating), 2),
-    },
-    // Compared with the 30 days before the window, so the dashboard can show
-    // a direction rather than a bare number.
-    conversationTrend:
-      previous.conversations > 0
-        ? round(((total - Number(previous.conversations)) / Number(previous.conversations)) * 100, 1)
-        : null,
-  };
-}
-
-/** Daily buckets for the dashboard chart. */
-export async function timeseries(workspaceId, since) {
-  return query(
-    `SELECT
-        DATE(c.created_at)                     AS day,
-        COUNT(*)                               AS conversations,
-        SUM(ai_resolved = 1)                   AS ai_resolved,
-        SUM(ai_handover = 1)                   AS handovers,
-        AVG(NULLIF(c.first_response_seconds, 0)) AS avg_first_response
-      FROM conversations c
-     WHERE c.workspace_id = ? AND c.created_at >= ?
-     GROUP BY DATE(c.created_at)
-     ORDER BY day`,
-    [workspaceId, since],
-  );
-}
-
-/**
- * Volume and quality split by channel - shows which channel performs worst.
- * Reads `vw_conversation_metrics`, which already carries the per-thread message
- * counts as subqueries, so no second pass over `messages` is needed.
- */
-export async function byChannel(workspaceId, since) {
-  return query(
-    `SELECT
-        channel_type                                          AS channel,
-        COUNT(*)                                              AS conversations,
-        COALESCE(SUM(inbound_messages + outbound_messages), 0) AS messages,
-        SUM(ai_resolved = 1)                                  AS ai_resolved,
-        SUM(ai_handover = 1)                                  AS handovers,
-        AVG(NULLIF(first_response_seconds, 0))                AS avg_first_response,
-        AVG(NULLIF(TIMESTAMPDIFF(SECOND, created_at, resolved_at), 0)) AS avg_resolution
-      FROM vw_conversation_metrics
-     WHERE workspace_id = ? AND created_at >= ?
-     GROUP BY channel_type
-     ORDER BY conversations DESC`,
-    [workspaceId, since],
-  );
-}
-
-/** Per-agent leaderboard: volume, speed and how often the AI had to step in. */
-export async function byAgent(workspaceId, since) {
-  return query(
-    `SELECT
-        u.id                        AS agent_id,
-        u.full_name                 AS name,
-        u.email,
-        COUNT(c.id)                 AS assigned,
-        SUM(c.status = 'closed')    AS closed,
-        SUM(c.ai_handover = 1)      AS handovers,
-        AVG(NULLIF(c.first_response_seconds, 0)) AS avg_first_response,
-        AVG(NULLIF(TIMESTAMPDIFF(SECOND, c.created_at, c.resolved_at), 0)) AS avg_resolution
-      FROM workspace_members wm
-      JOIN users u ON u.id = wm.user_id
-      LEFT JOIN conversations c
-        ON c.assignee_id = u.id AND c.workspace_id = wm.workspace_id AND c.created_at >= ?
-     WHERE wm.workspace_id = ?
-     GROUP BY u.id, u.full_name, u.email
-     ORDER BY assigned DESC`,
-    [since, workspaceId],
-  );
-}
-
-/**
- * Everything the report needs about the assistant, in one payload:
- * how often it answered, when it stood down and why, and the gaps it exposed.
- */
-export async function aiPerformance(workspaceId, since) {
-  const totals = await queryOne(
-    `SELECT
-        COUNT(*)                                    AS conversations,
-        SUM(ai_message_count)                       AS ai_messages,
-        SUM(ai_handover = 1)                        AS handovers,
-        SUM(ai_resolved = 1)                        AS resolved,
-        AVG(NULLIF(ai_confidence, 0))               AS avg_confidence
-      FROM conversations
-     WHERE workspace_id = ? AND created_at >= ?`,
-    [workspaceId, since],
-  );
-
-  const reasons = await query(
-    `SELECT COALESCE(ai_handover_reason, 'unspecified') AS reason, COUNT(*) AS count
-       FROM conversations
-      WHERE workspace_id = ? AND created_at >= ? AND ai_handover = 1
-      GROUP BY ai_handover_reason
-      ORDER BY count DESC`,
-    [workspaceId, since],
-  );
-
-  const intents = await query(
-    `SELECT COALESCE(intent, 'other') AS intent, COUNT(*) AS count
-       FROM messages
-      WHERE workspace_id = ? AND created_at >= ? AND direction = 'inbound'
-      GROUP BY intent
-      ORDER BY count DESC
-      LIMIT 10`,
-    [workspaceId, since],
-  );
-
-  const unanswered = await queryOne(
-    `SELECT COUNT(*) AS questions, COALESCE(SUM(occurrences), 0) AS asked
-       FROM unanswered_questions WHERE workspace_id = ?`,
-    [workspaceId],
-  );
-
-  const total = Number(totals.conversations ?? 0);
-  return {
-    aiMessages: Number(totals.ai_messages ?? 0),
-    resolved: Number(totals.resolved ?? 0),
-    handovers: Number(totals.handed_over ?? 0),
-    aiResolutionRate: total ? round((Number(totals.resolved) / total) * 100, 1) : 0,
-    avgConfidence: totals.avg_confidence === null ? null : round(Number(totals.avg_confidence), 3),
-    // Why the assistant stepped aside. `low_confidence` and `llm_declined` are
-    // knowledge-base gaps; `customer_requested_human` is working as intended.
-    handoverReasons: reasons.map((row) => ({ reason: row.reason, count: Number(row.count) })),
-    topIntents: intents.map((row) => ({ intent: row.intent, count: Number(row.count) })),
-    knowledgeGaps: {
-      distinctQuestions: Number(unanswered.questions ?? 0),
-      totalAsked: Number(unanswered.asked ?? 0),
-    },
-  };
-}
-
-/** FAQ effectiveness: which entries carry the load, and which are dead weight. */
-export async function faqPerformance(workspaceId) {
-  return query(
-    `SELECT id, question, category, match_count, no_match_count, is_active,
-            ROUND(100.0 * match_count / NULLIF(match_count + no_match_count, 0), 1) AS hit_rate
-       FROM faqs
-      WHERE workspace_id = ?
-      ORDER BY match_count DESC, no_match_count DESC`,
-    [workspaceId],
-  );
-}
-
+const numeric = (value) => Number(value ?? 0);
+const mean = (values) => values.length ? values.reduce((total, value) => total + value, 0) / values.length : null;
 const round = (value, places) => {
+  if (value === null) return null;
   const factor = 10 ** places;
   return Math.round(value * factor) / factor;
 };
+const isTrue = (value) => value === true || value === 1;
+const dayOf = (value) => new Date(value).toISOString().slice(0, 10);
+const groupCount = (rows, key, fallback) => {
+  const counts = new Map();
+  for (const row of rows) {
+    const name = row[key] || fallback;
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  return [...counts].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count);
+};
+
+async function conversationsSince(workspaceId, since) {
+  return selectAllRows('conversations', '*', { workspace_id: workspaceId }, {
+    gte: since ? { created_at: since.toISOString() } : {},
+    order: [{ column: 'id', ascending: true }],
+  });
+}
+
+export async function overview(workspaceId, since) {
+  const [conversations, previousRows, feedback] = await Promise.all([
+    conversationsSince(workspaceId, since),
+    selectAllRows('conversations', 'id', { workspace_id: workspaceId }, {
+      gte: { created_at: new Date(since.getTime() - 30 * 86400000).toISOString() },
+      lt: { created_at: since.toISOString() },
+    }),
+    selectAllRows('message_feedback', 'rating', { workspace_id: workspaceId }, {
+      gte: { created_at: since.toISOString() },
+    }),
+  ]);
+  const total = conversations.length;
+  const previous = previousRows.length;
+  const open = conversations.filter((row) => row.status === 'open').length;
+  const pending = conversations.filter((row) => row.status === 'pending').length;
+  const closed = conversations.filter((row) => row.status === 'closed').length;
+  const handedOver = conversations.filter((row) => isTrue(row.ai_handover)).length;
+  const aiResolved = conversations.filter((row) => isTrue(row.ai_resolved)).length;
+  const firstResponse = conversations.map((row) => numeric(row.first_response_seconds)).filter((v) => v > 0);
+  const resolution = conversations.map((row) => {
+    if (!row.resolved_at) return null;
+    return (new Date(row.resolved_at).getTime() - new Date(row.created_at).getTime()) / 1000;
+  }).filter((value) => value !== null && value !== 0);
+  const averageRating = mean(feedback.map((row) => row.rating === 'up' ? 1 : row.rating === 'down' ? 2 : null).filter((v) => v !== null));
+  return {
+    conversations: total,
+    open,
+    pending,
+    closed,
+    handedOver,
+    aiResolved,
+    aiResolutionRate: total ? round((aiResolved / total) * 100, 1) : 0,
+    handoverRate: total ? round((handedOver / total) * 100, 1) : 0,
+    avgFirstResponseSeconds: firstResponse.length ? Math.round(mean(firstResponse)) : null,
+    avgResolutionSeconds: resolution.length ? Math.round(mean(resolution)) : null,
+    aiMessages: conversations.reduce((sum, row) => sum + numeric(row.ai_message_count), 0),
+    satisfaction: {
+      rated: feedback.length,
+      avgRating: round(averageRating, 2),
+    },
+    conversationTrend: previous
+      ? round(((total - previous) / previous) * 100, 1)
+      : null,
+  };
+}
+
+export async function timeseries(workspaceId, since) {
+  const rows = await conversationsSince(workspaceId, since);
+  const groups = new Map();
+  for (const row of rows) {
+    const day = dayOf(row.created_at);
+    const group = groups.get(day) ?? {
+      day, conversations: 0, ai_resolved: 0, handovers: 0, firstResponses: [],
+    };
+    group.conversations += 1;
+    if (isTrue(row.ai_resolved)) group.ai_resolved += 1;
+    if (isTrue(row.ai_handover)) group.handovers += 1;
+    if (numeric(row.first_response_seconds) > 0) group.firstResponses.push(numeric(row.first_response_seconds));
+    groups.set(day, group);
+  }
+  return [...groups.values()].sort((a, b) => a.day.localeCompare(b.day)).map((row) => ({
+    day: row.day,
+    conversations: row.conversations,
+    ai_resolved: row.ai_resolved,
+    handovers: row.handovers,
+    avg_first_response: mean(row.firstResponses),
+  }));
+}
+
+export async function byChannel(workspaceId, since) {
+  const rows = await selectAllRows('conversations', '*,channels(type)', { workspace_id: workspaceId }, {
+    gte: { created_at: since.toISOString() },
+    order: [{ column: 'id', ascending: true }],
+  });
+  const groups = new Map();
+  for (const row of rows) {
+    const name = row.channels?.type ?? 'unknown';
+    const group = groups.get(name) ?? {
+      channel: name, conversations: 0, messages: 0, ai_resolved: 0, handovers: 0,
+      firstResponses: [], resolutions: [],
+    };
+    group.conversations += 1;
+    if (isTrue(row.ai_resolved)) group.ai_resolved += 1;
+    if (isTrue(row.ai_handover)) group.handovers += 1;
+    if (numeric(row.first_response_seconds) > 0) group.firstResponses.push(numeric(row.first_response_seconds));
+    if (row.resolved_at) {
+      group.resolutions.push((new Date(row.resolved_at).getTime() - new Date(row.created_at).getTime()) / 1000);
+    }
+    groups.set(name, group);
+  }
+  const ids = rows.map((row) => row.id);
+  if (ids.length) {
+    const messages = await selectAllRows('messages', 'conversation_id', { workspace_id: workspaceId }, {
+      in: { conversation_id: ids },
+    });
+    for (const message of messages) {
+      const conversation = rows.find((row) => row.id === message.conversation_id);
+      const group = groups.get(conversation?.channels?.type ?? 'unknown');
+      if (group) group.messages += 1;
+    }
+  }
+  return [...groups.values()]
+    .map((row) => ({
+      channel: row.channel,
+      conversations: row.conversations,
+      messages: row.messages,
+      ai_resolved: row.ai_resolved,
+      handovers: row.handovers,
+      avg_first_response: mean(row.firstResponses),
+      avg_resolution: mean(row.resolutions),
+    }))
+    .sort((a, b) => b.conversations - a.conversations);
+}
+
+export async function byAgent(workspaceId, since) {
+  const [members, conversations] = await Promise.all([
+    listMembersOfWorkspace(workspaceId),
+    conversationsSince(workspaceId, since),
+  ]);
+  return members.map((member) => {
+    const assigned = conversations.filter((row) => row.assignee_id === member.user_id);
+    const first = assigned.map((row) => numeric(row.first_response_seconds)).filter((v) => v > 0);
+    const resolutions = assigned.map((row) => row.resolved_at
+      ? (new Date(row.resolved_at).getTime() - new Date(row.created_at).getTime()) / 1000
+      : null).filter((v) => v !== null);
+    return {
+      agent_id: member.user_id,
+      name: member.full_name,
+      email: member.email,
+      assigned: assigned.length,
+      closed: assigned.filter((row) => row.status === 'closed').length,
+      handovers: assigned.filter((row) => isTrue(row.ai_handover)).length,
+      avg_first_response: mean(first),
+      avg_resolution: mean(resolutions),
+    };
+  }).sort((a, b) => b.assigned - a.assigned);
+}
+
+export async function aiPerformance(workspaceId, since) {
+  const [conversations, messages, unanswered] = await Promise.all([
+    conversationsSince(workspaceId, since),
+    selectAllRows('messages', 'intent,direction,created_at', { workspace_id: workspaceId, direction: 'inbound' }, {
+      gte: { created_at: since.toISOString() },
+    }),
+    selectAllRows('unanswered_questions', 'occurrences', { workspace_id: workspaceId }),
+  ]);
+  const handovers = conversations.filter((row) => isTrue(row.ai_handover));
+  const resolved = conversations.filter((row) => isTrue(row.ai_resolved));
+  const confidences = conversations.map((row) => numeric(row.ai_confidence)).filter((v) => v > 0);
+  const reasons = groupCount(handovers, 'ai_handover_reason', 'unspecified');
+  const intents = groupCount(messages, 'intent', 'other').slice(0, 10);
+  return {
+    aiMessages: conversations.reduce((sum, row) => sum + numeric(row.ai_message_count), 0),
+    resolved: resolved.length,
+    handovers: handovers.length,
+    aiResolutionRate: conversations.length ? round((resolved.length / conversations.length) * 100, 1) : 0,
+    avgConfidence: round(mean(confidences), 3),
+    handoverReasons: reasons.map(({ name, count }) => ({ reason: name, count })),
+    topIntents: intents.map(({ name, count }) => ({ intent: name, count })),
+    knowledgeGaps: {
+      distinctQuestions: unanswered.length,
+      totalAsked: unanswered.reduce((sum, row) => sum + numeric(row.occurrences), 0),
+    },
+  };
+}
+
+export async function faqPerformance(workspaceId) {
+  const rows = await selectAllRows('faqs', 'id,question,category,match_count,no_match_count,is_active', {
+    workspace_id: workspaceId,
+  });
+  return rows.sort((a, b) =>
+    numeric(b.match_count) - numeric(a.match_count) || numeric(b.no_match_count) - numeric(a.no_match_count),
+  ).map((row) => ({
+    ...row,
+    hit_rate: row.match_count + row.no_match_count
+      ? round((100 * row.match_count) / (row.match_count + row.no_match_count), 1)
+      : null,
+  }));
+}

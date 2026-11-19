@@ -15,7 +15,7 @@ import { asyncHandler, AppError } from '../../middleware/error.js';
 import { getChannelById } from '../../services/channels.service.js';
 import { createAdapterForChannel } from '../../adapters/factory.js';
 import { sendMessageToConversation, mapMessage, getConversationById } from '../../services/conversation.service.js';
-import { query, queryOne, execute } from '../../db/pool.js';
+import { getSupabaseClient, selectRows, selectOne, updateRows, upsertRow } from '../../db/supabase.js';
 
 const router = Router({ mergeParams: true });
 
@@ -25,6 +25,16 @@ async function parentConversation(req) {
   const conversation = await getConversationById(conversationId, req.workspace.id);
   if (!conversation) throw AppError.notFound('Conversation not found');
   return conversation;
+}
+
+async function messageWithSender(id) {
+  const { data, error } = await getSupabaseClient()
+    .from('messages')
+    .select('*,users(full_name)')
+    .eq('id', id)
+    .single();
+  if (error) throw error;
+  return { ...data, sender_display_name: data.users?.full_name ?? null };
 }
 
 // ---------------------------------------------------------------------------
@@ -45,23 +55,24 @@ router.get(
     const { before, limit } = queryOf(req);
     const conversationId = Number(req.params.conversationId);
 
-    const rows = await query(
-      `SELECT m.*, u.full_name AS sender_display_name
-         FROM messages m
-         LEFT JOIN users u ON u.id = m.sender_id
-        WHERE m.conversation_id = ?
-          AND (? IS NULL OR m.id < ?)
-        ORDER BY m.id DESC
-        LIMIT ?`,
-      [conversationId, before ?? null, before ?? null, limit],
-    );
+    const rows = await selectRows('messages', '*,users(full_name)', {
+      conversation_id: conversationId,
+    }, {
+      ...(before ? { lt: { id: before } } : {}),
+      order: [{ column: 'id', ascending: false }],
+      limit,
+    });
+    const messages = rows.map((row) => ({
+      ...row,
+      sender_display_name: row.users?.full_name ?? null,
+    }));
 
     // Rows come back newest-first; flip to chronological for the chat pane.
     // The cursor for "load older" is the OLDEST id we just returned.
-    const oldest = rows[rows.length - 1];
-    const hasMore = rows.length === limit;
+    const oldest = messages[messages.length - 1];
+    const hasMore = messages.length === limit;
     res.json({
-      messages: rows.slice().reverse().map(mapMessage),
+      messages: messages.slice().reverse().map(mapMessage),
       nextCursor: hasMore ? oldest.id : null,
       hasMore,
     });
@@ -124,13 +135,7 @@ router.post(
       senderType: 'agent',
     });
 
-    const final = await queryOne(
-      `SELECT m.*, u.full_name AS sender_display_name
-         FROM messages m
-         LEFT JOIN users u ON u.id = m.sender_id
-        WHERE m.id = ?`,
-      [message.id],
-    );
+    const final = await messageWithSender(message.id);
     res.status(201).json({ message: mapMessage(final) });
   }),
 );
@@ -148,10 +153,11 @@ router.post(
     params: z.object({ messageId: z.coerce.number().int().positive() }),
   }),
   asyncHandler(async (req, res) => {
-    const message = await queryOne(
-      'SELECT * FROM messages WHERE id = ? AND conversation_id = ? AND workspace_id = ?',
-      [req.params.messageId, req.params.conversationId, req.workspace.id],
-    );
+    const message = await selectOne('messages', '*', {
+      id: req.params.messageId,
+      conversation_id: req.params.conversationId,
+      workspace_id: req.workspace.id,
+    });
     if (!message) throw AppError.notFound('Message not found');
     if (message.status === 'sent') {
       throw AppError.badRequest('That message was already delivered');
@@ -167,18 +173,20 @@ router.post(
         body: message.body,
         attachments: message.attachments ?? [],
       });
-      await execute(
-        'UPDATE messages SET status = ?, external_id = COALESCE(?, external_id), error_message = NULL, delivered_at = NOW() WHERE id = ?',
-        [result?.status ?? 'sent', result?.externalId ?? null, message.id],
-      );
+      await updateRows('messages', {
+        status: result?.status ?? 'sent',
+        ...(result?.externalId ? { external_id: result.externalId } : {}),
+        error_message: null,
+        delivered_at: new Date().toISOString(),
+      }, { id: message.id });
     } catch (error) {
-      await execute('UPDATE messages SET status = "failed", error_message = ? WHERE id = ?', [
-        error.message.slice(0, 500),
-        message.id,
-      ]);
+      await updateRows('messages', {
+        status: 'failed',
+        error_message: error.message.slice(0, 500),
+      }, { id: message.id });
     }
 
-    res.json({ message: mapMessage(await queryOne('SELECT * FROM messages WHERE id = ?', [message.id])) });
+    res.json({ message: mapMessage(await selectOne('messages', '*', { id: message.id })) });
   }),
 );
 
@@ -198,28 +206,23 @@ router.post(
     }),
   }),
   asyncHandler(async (req, res) => {
-    const message = await queryOne(
-      'SELECT id, conversation_id, workspace_id, sender_type, body FROM messages WHERE id = ? AND workspace_id = ?',
-      [req.params.messageId, req.workspace.id],
-    );
+    const message = await selectOne('messages', 'id,conversation_id,workspace_id,sender_type,body', {
+      id: req.params.messageId,
+      workspace_id: req.workspace.id,
+    });
     if (!message) throw AppError.notFound('Message not found');
     if (message.sender_type !== 'ai') {
       throw AppError.badRequest('Feedback is only collected on AI replies');
     }
 
-    await execute(
-      `INSERT INTO message_feedback (message_id, conversation_id, workspace_id, user_id, rating, comment)
-       VALUES (?, ?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE rating = VALUES(rating), comment = VALUES(comment)`,
-      [
-        message.id,
-        message.conversation_id,
-        message.workspace_id,
-        req.user.id,
-        req.body.rating,
-        req.body.comment ?? null,
-      ],
-    );
+    await upsertRow('message_feedback', {
+      message_id: message.id,
+      conversation_id: message.conversation_id,
+      workspace_id: message.workspace_id,
+      user_id: req.user.id,
+      rating: req.body.rating,
+      comment: req.body.comment ?? null,
+    }, 'message_id');
     res.status(201).json({ ok: true });
   }),
 );

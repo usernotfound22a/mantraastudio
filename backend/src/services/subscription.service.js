@@ -5,7 +5,7 @@
  * the running usage. Plan *definitions* (names, prices) live in code -
  * see PLAN_CATALOG - because the Stripe price IDs come from the environment.
  */
-import { query, queryOne, execute } from '../db/pool.js';
+import { selectRows, selectOne, callRpc } from '../db/supabase.js';
 import { AppError } from '../middleware/error.js';
 import { env } from '../config/env.js';
 
@@ -72,10 +72,10 @@ export const PLAN_CATALOG = {
 };
 
 export const getSubscription = (workspaceId) =>
-  queryOne('SELECT * FROM subscriptions WHERE workspace_id = ? LIMIT 1', [workspaceId]);
+  selectOne('subscriptions', '*', { workspace_id: workspaceId });
 
 export const listSubscriptions = (workspaceId) =>
-  query('SELECT * FROM subscriptions WHERE workspace_id = ?', [workspaceId]);
+  selectRows('subscriptions', '*', { workspace_id: workspaceId });
 
 /**
  * Resolves the Stripe price id for a plan + billing period.
@@ -110,13 +110,11 @@ export function purchasability(planId) {
  */
 export async function incrementUsage(workspaceId, { messages = 0, aiReplies = 0 } = {}) {
   if (!messages && !aiReplies) return null;
-  return execute(
-    `UPDATE subscriptions
-        SET messages_used   = messages_used + ?,
-            ai_replies_used = ai_replies_used + ?
-      WHERE workspace_id = ?`,
-    [messages, aiReplies, workspaceId],
-  );
+  return callRpc('increment_subscription_usage', {
+    p_workspace_id: workspaceId,
+    p_messages: messages,
+    p_ai_replies: aiReplies,
+  });
 }
 
 /** Whether a workspace may send another AI reply this period. */

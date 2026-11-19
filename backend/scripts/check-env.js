@@ -1,10 +1,10 @@
 /**
  * Environment doctor: `npm run check`
- * Verifies that .env parses, MySQL is reachable and the required tables exist.
+ * Verifies that .env parses and the Supabase project is reachable.
  * Run this whenever something is not working - it prints the exact fix.
  */
 import { env, logConfigWarnings, BACKEND_ROOT } from '../src/config/env.js';
-import { pingDatabase, query, closePool } from '../src/db/pool.js';
+import { getAdminClient, pingSupabase, withSupabaseClient } from '../src/db/supabase.js';
 import { isMetaConfigured, loadMetaSettings } from '../src/services/meta-settings.service.js';
 
 const REQUIRED_TABLES = [
@@ -18,8 +18,6 @@ const REQUIRED_TABLES = [
   'faqs',
   'subscriptions',
   'system_settings',
-  // Plugin system 3. If these are missing, the API returns 500s on the
-  // developer pages instead of a clear "run db:migrate".
   'api_keys',
   'webhook_endpoints',
   'webhook_deliveries',
@@ -37,29 +35,30 @@ async function main() {
   ok(`CORS origins: ${env.CORS_ORIGINS.join(', ')}`);
 
   try {
-    const latency = await pingDatabase();
-    ok(`MySQL reachable at ${env.DB_HOST}:${env.DB_PORT}/${env.DB_NAME} (${latency}ms)`);
+    const latency = await pingSupabase();
+    ok(`Supabase reachable (${latency}ms)`);
   } catch (error) {
-    bad(`MySQL not reachable: ${error.message}`);
-    console.log('         -> start MySQL, then run: npm run db:migrate');
-    await closePool();
+    bad(`Supabase not reachable: ${error.message}`);
+    console.log('         -> set SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, and SUPABASE_SECRET_KEY.');
     process.exit(1);
   }
 
-  await loadMetaSettings();
-  for (const warning of logConfigWarnings({ metaConfigured: isMetaConfigured() })) warn(warning);
-
-  const rows = await query('SHOW TABLES');
-  const existing = new Set(rows.map((row) => Object.values(row)[0]));
-  const missing = REQUIRED_TABLES.filter((table) => !existing.has(table));
-  if (missing.length) {
-    bad(`Missing tables: ${missing.join(', ')}`);
-    console.log('         -> run: npm run db:migrate');
-  } else {
-    ok(`All ${REQUIRED_TABLES.length} tables present`);
-  }
-
-  await closePool();
+  await withSupabaseClient(getAdminClient(), async () => {
+    await loadMetaSettings();
+    for (const warning of logConfigWarnings({ metaConfigured: isMetaConfigured() })) warn(warning);
+    const client = getAdminClient();
+    const missing = [];
+    for (const table of REQUIRED_TABLES) {
+      const { error } = await client.from(table).select('*', { head: true, count: 'exact' }).limit(0);
+      if (error) missing.push(table);
+    }
+    if (missing.length) {
+      bad(`Missing or inaccessible tables: ${missing.join(', ')}`);
+      console.log('         -> apply the SQL migrations in supabase/migrations.');
+    } else {
+      ok(`All ${REQUIRED_TABLES.length} required tables present`);
+    }
+  });
   console.log('\nDone.\n');
 }
 

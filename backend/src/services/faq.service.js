@@ -15,7 +15,7 @@
  * If you later want embeddings, `searchFaqs()` is the only function to
  * replace - the AI service only sees { faq, score }.
  */
-import { query } from '../db/pool.js';
+import { selectRows, callRpc } from '../db/supabase.js';
 
 /** Words that carry no retrieval signal. */
 const STOP_WORDS = new Set([
@@ -41,7 +41,7 @@ export function tokenize(text) {
   ];
 }
 
-/** Parses the JSON columns MySQL returns, tolerating already-parsed values. */
+/** Parses JSON values while tolerating already-parsed driver results. */
 function asArray(value) {
   if (!value) return [];
   if (Array.isArray(value)) return value;
@@ -55,12 +55,10 @@ function asArray(value) {
 
 /** Active FAQ entries for a workspace, with their match statistics. */
 export const listActiveFaqs = (workspaceId) =>
-  query(
-    `SELECT id, question, answer, keywords, tags, category, source,
-            match_count, no_match_count
-       FROM faqs
-      WHERE workspace_id = ? AND is_active = 1`,
-    [workspaceId],
+  selectRows(
+    'faqs',
+    'id,question,answer,keywords,tags,category,source,match_count,no_match_count',
+    { workspace_id: workspaceId, is_active: 1 },
   );
 
 /**
@@ -161,9 +159,7 @@ export async function searchFaqs(workspaceId, question, limit = 3) {
 
 /** Records that an FAQ was used (drives the "top questions" report). */
 export const recordFaqMatch = (faqId) =>
-  query('UPDATE faqs SET match_count = match_count + 1, last_matched_at = NOW() WHERE id = ?', [
-    faqId,
-  ]);
+  callRpc('record_faq_match', { p_faq_id: faqId });
 
 /**
  * Records a NEAR miss: the retriever found a plausible entry but the confidence
@@ -171,7 +167,7 @@ export const recordFaqMatch = (faqId) =>
  * entry close but not enough?", which is a tuning signal.
  */
 export const recordFaqMiss = (faqId) =>
-  query('UPDATE faqs SET no_match_count = no_match_count + 1 WHERE id = ?', [faqId]);
+  callRpc('record_faq_miss', { p_faq_id: faqId });
 
 /**
  * Records a question we could not answer at all. Deduped on the question text,
@@ -179,23 +175,21 @@ export const recordFaqMiss = (faqId) =>
  * This is what the "add to knowledge base" list in Settings -> FAQ reads.
  */
 export const recordUnansweredQuestion = (workspaceId, question, { conversationId = null, channelId = null } = {}) =>
-  query(
-    `INSERT INTO unanswered_questions (workspace_id, question, conversation_id, channel_id, last_asked_at)
-     VALUES (?, ?, ?, ?, NOW())
-     ON DUPLICATE KEY UPDATE
-       occurrences   = occurrences + 1,
-       last_asked_at = NOW(),
-       conversation_id = COALESCE(VALUES(conversation_id), conversation_id)`,
-    [workspaceId, String(question).slice(0, 500), conversationId, channelId],
-  );
+  callRpc('record_unanswered_question', {
+    p_workspace_id: workspaceId,
+    p_question: String(question).slice(0, 500),
+    p_conversation_id: conversationId,
+    p_channel_id: channelId,
+  });
 
 /** The questions the knowledge base is missing, most frequent first. */
 export const listUnansweredQuestions = (workspaceId, limit = 50) =>
-  query(
-    `SELECT id, question, occurrences, first_asked_at, last_asked_at
-       FROM unanswered_questions
-      WHERE workspace_id = ?
-      ORDER BY occurrences DESC, last_asked_at DESC
-      LIMIT ?`,
-    [workspaceId, Math.min(Number(limit) || 50, 200)],
+  selectRows(
+    'unanswered_questions',
+    'id,question,occurrences,first_asked_at,last_asked_at',
+    { workspace_id: workspaceId },
+    {
+      order: [{ column: 'occurrences', ascending: false }, { column: 'last_asked_at', ascending: false }],
+      limit: Math.min(Number(limit) || 50, 200),
+    },
   );

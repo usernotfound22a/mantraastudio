@@ -1,7 +1,7 @@
 /**
  * End-to-end verification of the public API + outbound webhooks.
  *
- * This drives the real HTTP surface against a real MySQL database:
+ * This drives the real HTTP surface against a configured Supabase project:
  *   1. log in as the demo user
  *   2. create a scoped API key via the dashboard route
  *   3. call /api/v1 with it, and prove scope enforcement actually blocks
@@ -14,7 +14,7 @@
  */
 import http from 'node:http';
 import crypto from 'node:crypto';
-import { closePool, execute, query, queryOne } from '../src/db/pool.js';
+import { deleteRows, getAdminClient, insertRow, selectOne, withSupabaseClient } from '../src/db/supabase.js';
 import { startWebhookWorker, stopWebhookWorker, processDueDeliveries, signPayload } from '../src/services/webhook.service.js';
 
 const BASE = process.env.API_BASE ?? 'http://localhost:4000';
@@ -227,25 +227,30 @@ try {
     } else {
       // Build a genuine second tenant that the demo seed does not have.
       const slug = `verify-other-${Date.now()}`;
-      const ws = await execute(
-        'INSERT INTO workspaces (name, slug) VALUES (?, ?)',
-        ['Verify Other Tenant', slug],
+      const ws = await withSupabaseClient(getAdminClient(), () =>
+        insertRow('workspaces', { name: 'Verify Other Tenant', slug }),
       );
-      const otherWsId = ws.insertId;
+      const otherWsId = ws.id;
       try {
         // Reuse the demo channel (channels are per-workspace, so point at the
         // demo one; the conversation row is what must stay invisible).
-        const ch = await queryOne('SELECT id FROM channels WHERE workspace_id = ? LIMIT 1', [workspaceId]);
+        const ch = await withSupabaseClient(getAdminClient(), () =>
+          selectOne('channels', 'id', { workspace_id: workspaceId }),
+        );
         if (!ch) {
           check('cross-tenant isolation skipped (demo workspace has no channel)', true);
         } else {
-          const convo = await execute(
-            `INSERT INTO conversations (workspace_id, channel_id, external_id, contact_external_id, contact_name)
-             VALUES (?, ?, ?, ?, ?)`,
-            [otherWsId, ch.id, `verify-ext-${Date.now()}`, `verify-contact-${Date.now()}`, 'Other Tenant Customer'],
+          const convo = await withSupabaseClient(getAdminClient(), () =>
+            insertRow('conversations', {
+              workspace_id: otherWsId,
+              channel_id: ch.id,
+              external_id: `verify-ext-${Date.now()}`,
+              contact_external_id: `verify-contact-${Date.now()}`,
+              contact_name: 'Other Tenant Customer',
+            }),
           );
 
-          const leak = await call(`/api/v1/conversations/${convo.insertId}`, {
+          const leak = await call(`/api/v1/conversations/${convo.id}`, {
             headers: { Authorization: `Bearer ${isoSecret}` },
           });
           check('other tenant conversation is not readable', leak.status === 404, `status=${leak.status}`);
@@ -256,22 +261,26 @@ try {
           const listed = list.json?.conversations ?? [];
           check(
             'other tenant conversation is absent from listings',
-            !listed.some((c) => Number(c.id) === Number(convo.insertId)),
+            !listed.some((c) => Number(c.id) === Number(convo.id)),
             `count=${listed.length}`,
           );
         }
       } finally {
         // ON DELETE CASCADE removes the conversation; drop the workspace too.
-        await execute('DELETE FROM workspaces WHERE id = ?', [otherWsId]).catch(() => {});
-        await execute('DELETE FROM api_keys WHERE name = ?', ['verify-isolation']).catch(() => {});
+        await withSupabaseClient(getAdminClient(), async () => {
+          await deleteRows('workspaces', { id: otherWsId }).catch(() => {});
+          await deleteRows('api_keys', { name: 'verify-isolation' }).catch(() => {});
+        });
       }
     }
 } finally {
   stopWebhookWorker();
   await new Promise((resolve) => server.close(resolve));
-  await execute('DELETE FROM api_keys WHERE name LIKE ?', ['verify-%']).catch(() => {});
-  await execute('DELETE FROM webhook_endpoints WHERE description LIKE ?', ['%verify%']).catch(() => {});
-  await closePool();
+  await withSupabaseClient(getAdminClient(), async () => {
+    const client = getAdminClient();
+    await client.from('api_keys').delete().like('name', 'verify-%').catch(() => {});
+    await client.from('webhook_endpoints').delete().like('description', '%verify%').catch(() => {});
+  });
 }
 
 console.log(`\n${failures === 0 ? 'ALL PUBLIC API CHECKS PASSED' : `${failures} CHECK(S) FAILED`}\n`);

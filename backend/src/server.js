@@ -2,7 +2,7 @@
  * Server entry point.
  *
  * Responsibilities, in order:
- *   1. verify MySQL is reachable (fail fast with an actionable message)
+ *   1. verify Supabase is reachable (fail fast with an actionable message)
  *   2. start the HTTP server
  *   3. attach Socket.IO
  *   4. handle SIGINT/SIGTERM gracefully (stop accepting, close sockets, close DB)
@@ -11,7 +11,7 @@ import http from 'node:http';
 import { env } from './config/env.js';
 import { logger } from './config/logger.js';
 import { createApp } from './app.js';
-import { pingDatabase, closePool } from './db/pool.js';
+import { pingSupabase } from './db/supabase.js';
 import { initSocket, closeSocket } from './services/socket.service.js';
 import { startWebhookWorker, stopWebhookWorker } from './services/webhook.service.js';
 import { ensureAdaptersLoaded } from './adapters/factory.js';
@@ -27,19 +27,19 @@ async function start() {
   await ensureAdaptersLoaded();
   await loadAiPlugins();
 
-  // 1. Database pre-flight -------------------------------------------------
+  // 1. Supabase pre-flight -------------------------------------------------
   try {
-    const latency = await pingDatabase();
+    const latency = await pingSupabase();
     logger.info(
-      { database: env.DB_NAME, latencyMs: latency },
-      'Database connection OK',
+      { latencyMs: latency },
+      'Supabase connection OK',
     );
   } catch (error) {
     logger.error(
       { code: error.code, message: error.message },
-      'Cannot reach MySQL - server not starting',
+      'Cannot reach Supabase - server not starting',
     );
-    logger.error('Fix: start MySQL, check backend/.env, then run `npm run db:migrate`');
+    logger.error('Fix: set SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, and SUPABASE_SECRET_KEY, then apply the Supabase migration');
     process.exit(1);
   }
 
@@ -94,7 +94,6 @@ async function start() {
       stopWebhookWorker();
       await closeSocket();
       await new Promise((resolve) => server.close(resolve));
-      await closePool();
       logger.info('Shutdown complete');
       process.exit(0);
     } catch (error) {

@@ -15,7 +15,7 @@
 import Stripe from 'stripe';
 import axios from 'axios';
 import { env } from '../config/env.js';
-import { queryOne, execute } from '../db/pool.js';
+import { getAdminClient, selectOne, insertRow, updateRows, withSupabaseClient } from '../db/supabase.js';
 import { childLogger } from '../config/logger.js';
 import { AppError } from '../middleware/error.js';
 import { PLAN_CATALOG, stripePriceFor, purchasability, getSubscription, mapSubscription } from './subscription.service.js';
@@ -190,26 +190,28 @@ export async function handleWebhook(rawBody, signature) {
 
   log.info({ type: event.type, id: event.id }, 'Stripe webhook received');
 
-  switch (event.type) {
-    case 'checkout.session.completed':
-      await onCheckoutCompleted(event.data.object);
-      break;
-    case 'customer.subscription.created':
-    case 'customer.subscription.updated':
-      await onSubscriptionChanged(event.data.object);
-      break;
-    case 'customer.subscription.deleted':
-      await onSubscriptionCancelled(event.data.object);
-      break;
-    case 'invoice.paid':
-      await onInvoicePaid(event.data.object);
-      break;
-    case 'invoice.payment_failed':
-      await onPaymentFailed(event.data.object);
-      break;
-    default:
-      log.debug({ type: event.type }, 'Unhandled Stripe event - ignored');
-  }
+  await withSupabaseClient(getAdminClient(), async () => {
+    switch (event.type) {
+      case 'checkout.session.completed':
+        await onCheckoutCompleted(event.data.object);
+        break;
+      case 'customer.subscription.created':
+      case 'customer.subscription.updated':
+        await onSubscriptionChanged(event.data.object);
+        break;
+      case 'customer.subscription.deleted':
+        await onSubscriptionCancelled(event.data.object);
+        break;
+      case 'invoice.paid':
+        await onInvoicePaid(event.data.object);
+        break;
+      case 'invoice.payment_failed':
+        await onPaymentFailed(event.data.object);
+        break;
+      default:
+        log.debug({ type: event.type }, 'Unhandled Stripe event - ignored');
+    }
+  });
 
   return { received: true, type: event.type };
 }
@@ -309,15 +311,12 @@ async function onInvoicePaid(invoice) {
     typeof invoice.subscription === 'string' ? invoice.subscription : invoice.subscription?.id;
   if (!subscriptionId) return;
 
-  const row = await queryOne('SELECT workspace_id FROM subscriptions WHERE stripe_subscription_id = ?', [
-    subscriptionId,
-  ]);
+  const row = await selectOne('subscriptions', 'workspace_id', { stripe_subscription_id: subscriptionId });
   if (!row) return;
 
-  await execute(
-    'UPDATE subscriptions SET messages_used = 0, ai_replies_used = 0, status = ? WHERE workspace_id = ?',
-    ['active', row.workspace_id],
-  );
+  await updateRows('subscriptions', { messages_used: 0, ai_replies_used: 0, status: 'active' }, {
+    workspace_id: row.workspace_id,
+  });
 
   const refreshed = await getSubscription(row.workspace_id);
   emitToWorkspace(row.workspace_id, EVENTS.SUBSCRIPTION_UPDATED, {
@@ -334,15 +333,10 @@ async function onPaymentFailed(invoice) {
     typeof invoice.subscription === 'string' ? invoice.subscription : invoice.subscription?.id;
   if (!subscriptionId) return;
 
-  const row = await queryOne('SELECT workspace_id FROM subscriptions WHERE stripe_subscription_id = ?', [
-    subscriptionId,
-  ]);
+  const row = await selectOne('subscriptions', 'workspace_id', { stripe_subscription_id: subscriptionId });
   if (!row) return;
 
-  await execute('UPDATE subscriptions SET status = ? WHERE workspace_id = ?', [
-    'past_due',
-    row.workspace_id,
-  ]);
+  await updateRows('subscriptions', { status: 'past_due' }, { workspace_id: row.workspace_id });
 
   const refreshed = await getSubscription(row.workspace_id);
   emitToWorkspace(row.workspace_id, EVENTS.SUBSCRIPTION_UPDATED, {
@@ -370,16 +364,21 @@ async function upsertSubscription({
   cancelAtPeriodEnd = false,
   active = true,
 }) {
-  const existing = await queryOne('SELECT * FROM subscriptions WHERE workspace_id = ?', [workspaceId]);
+  const existing = await selectOne('subscriptions', '*', { workspace_id: workspaceId });
 
   if (!existing) {
-    await execute(
-      `INSERT INTO subscriptions
-         (workspace_id, plan, status, stripe_customer_id, stripe_subscription_id,
-          current_period_end, cancel_at_period_end, messages_used, ai_replies_used, seats_used)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 1)`,
-      [workspaceId, planId, status, stripeCustomerId, stripeSubscriptionId, currentPeriodEnd, cancelAtPeriodEnd],
-    );
+    await insertRow('subscriptions', {
+      workspace_id: workspaceId,
+      plan: planId,
+      status,
+      stripe_customer_id: stripeCustomerId,
+      stripe_subscription_id: stripeSubscriptionId,
+      current_period_end: currentPeriodEnd,
+      cancel_at_period_end: cancelAtPeriodEnd,
+      messages_used: 0,
+      ai_replies_used: 0,
+      seats_used: 1,
+    });
     return;
   }
 
@@ -388,15 +387,11 @@ async function upsertSubscription({
     return;
   }
 
-  await execute(
-    `UPDATE subscriptions
-        SET plan = ?, status = ?, stripe_customer_id = COALESCE(?, stripe_customer_id),
-            stripe_subscription_id = COALESCE(?, stripe_subscription_id),
-            current_period_end = COALESCE(?, current_period_end),
-            cancel_at_period_end = ?
-      WHERE workspace_id = ?`,
-    [planId, status, stripeCustomerId, stripeSubscriptionId, currentPeriodEnd, cancelAtPeriodEnd, workspaceId],
-  );
+  const changes = { plan: planId, status, cancel_at_period_end: cancelAtPeriodEnd };
+  if (stripeCustomerId) changes.stripe_customer_id = stripeCustomerId;
+  if (stripeSubscriptionId) changes.stripe_subscription_id = stripeSubscriptionId;
+  if (currentPeriodEnd) changes.current_period_end = currentPeriodEnd;
+  await updateRows('subscriptions', changes, { workspace_id: workspaceId });
 }
 
 function planForSubscription(subscription) {

@@ -10,7 +10,14 @@
  * "unread count", "first response time" and "reopen a closed thread when the
  * customer writes again" live here once, not in three adapters.
  */
-import { query, queryOne, execute, withTransaction, txQuery, txExecute } from '../db/pool.js';
+import {
+  getSupabaseClient,
+  selectRows,
+  selectOne,
+  insertRow,
+  updateRows,
+  callRpc,
+} from '../db/supabase.js';
 import { AppError } from '../middleware/error.js';
 import { childLogger } from '../config/logger.js';
 import { createAdapterForChannel } from '../adapters/factory.js';
@@ -25,10 +32,7 @@ const log = childLogger('conversations');
 // ===========================================================================
 
 export async function getConversationById(conversationId, workspaceId) {
-  return queryOne(
-    'SELECT * FROM conversations WHERE id = ? AND workspace_id = ? LIMIT 1',
-    [conversationId, workspaceId],
-  );
+  return selectOne('conversations', '*', { id: conversationId, workspace_id: workspaceId });
 }
 
 /**
@@ -37,24 +41,18 @@ export async function getConversationById(conversationId, workspaceId) {
  * "unified" without merging Facebook and Instagram identities.
  */
 export async function getOrCreateConversation({ channel, externalId, contact = {} }) {
-  const existing = await queryOne(
-    'SELECT * FROM conversations WHERE channel_id = ? AND external_id = ? LIMIT 1',
-    [channel.id, externalId],
-  );
+  const existing = await selectOne('conversations', '*', { channel_id: channel.id, external_id: externalId });
 
   if (existing) {
     // Enrich the contact over time: the first webhook often has no name, the
     // Graph API lookup that follows does.
     if (contact.name || contact.avatarUrl || contact.email) {
-      await execute(
-        `UPDATE conversations SET
-            contact_name       = COALESCE(contact_name, ?),
-            contact_avatar_url = COALESCE(contact_avatar_url, ?),
-            contact_email      = COALESCE(contact_email, ?),
-            contact_locale     = COALESCE(contact_locale, ?)
-          WHERE id = ?`,
-        [contact.name ?? null, contact.avatarUrl ?? null, contact.email ?? null, contact.locale ?? null, existing.id],
-      );
+      const changes = {};
+      if (!existing.contact_name && contact.name) changes.contact_name = contact.name;
+      if (!existing.contact_avatar_url && contact.avatarUrl) changes.contact_avatar_url = contact.avatarUrl;
+      if (!existing.contact_email && contact.email) changes.contact_email = contact.email;
+      if (!existing.contact_locale && contact.locale) changes.contact_locale = contact.locale;
+      if (Object.keys(changes).length) await updateRows('conversations', changes, { id: existing.id });
       existing.contact_name = existing.contact_name ?? contact.name;
       existing.contact_avatar_url = existing.contact_avatar_url ?? contact.avatarUrl;
       existing.contact_email = existing.contact_email ?? contact.email;
@@ -62,28 +60,29 @@ export async function getOrCreateConversation({ channel, externalId, contact = {
     return existing;
   }
 
-  const result = await execute(
-    `INSERT INTO conversations
-       (workspace_id, channel_id, external_id, contact_external_id,
-        contact_name, contact_avatar_url, contact_email, contact_locale, last_message_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
-    [
-      channel.workspace_id,
-      channel.id,
-      externalId,
-      contact.externalId ?? externalId,
-      contact.name ?? null,
-      contact.avatarUrl ?? null,
-      contact.email ?? null,
-      contact.locale ?? null,
-    ],
-  );
+  let created;
+  try {
+    created = await insertRow('conversations', {
+      workspace_id: channel.workspace_id,
+      channel_id: channel.id,
+      external_id: externalId,
+      contact_external_id: contact.externalId ?? externalId,
+      contact_name: contact.name ?? null,
+      contact_avatar_url: contact.avatarUrl ?? null,
+      contact_email: contact.email ?? null,
+      contact_locale: contact.locale ?? null,
+      last_message_at: new Date().toISOString(),
+    });
+  } catch (error) {
+    if (error.code !== '23505') throw error;
+    return selectOne('conversations', '*', { channel_id: channel.id, external_id: externalId });
+  }
 
   log.info(
-    { conversationId: result.insertId, channelId: channel.id, type: channel.type },
+    { conversationId: created.id, channelId: channel.id, type: channel.type },
     'Conversation created',
   );
-  return getConversationById(result.insertId, channel.workspace_id);
+  return created;
 }
 
 /**
@@ -101,54 +100,43 @@ export async function listConversations(workspaceId, filters = {}) {
     cursor,
   } = filters;
 
-  const where = ['c.workspace_id = ?'];
-  const params = [workspaceId];
-
-  if (status) {
-    where.push('c.status = ?');
-    params.push(status);
-  }
-  if (channelType) {
-    where.push('ch.type = ?');
-    params.push(channelType);
-  }
-  if (assigneeId === 'unassigned') {
-    where.push('c.assignee_id IS NULL');
-  } else if (assigneeId) {
-    where.push('c.assignee_id = ?');
-    params.push(Number(assigneeId));
-  }
-  if (unreadOnly) where.push('c.unread_count > 0');
-  if (search) {
-    where.push('(c.contact_name LIKE ? OR c.subject LIKE ? OR c.last_message_preview LIKE ?)');
-    const like = `%${search}%`;
-    params.push(like, like, like);
-  }
-
-  // Keyset pagination: cheaper and more stable than OFFSET on a table that
-  // re-sorts itself on every new message.
-  if (cursor) {
-    where.push('(c.last_message_at, c.id) < (SELECT last_message_at, id FROM conversations WHERE id = ?)');
-    params.push(cursor);
-  }
-
   const limitParam = Math.min(Number(limit) || 30, 100);
-
-  const rows = await query(
-    `SELECT c.id, c.status, c.priority, c.subject, c.contact_name, c.contact_avatar_url,
-            c.unread_count, c.last_message_at, c.last_message_preview, c.last_message_direction,
-            c.assignee_id, c.ai_handover, c.ai_handover_reason, c.ai_confidence,
-            c.first_response_seconds, c.ai_lead_tags,
-            ch.type AS channel_type, ch.name AS channel_name,
-            u.full_name AS assignee_name, u.avatar_url AS assignee_avatar_url
-       FROM conversations c
-       JOIN channels ch ON ch.id = c.channel_id
-       LEFT JOIN users u ON u.id = c.assignee_id
-      WHERE ${where.join(' AND ')}
-      ORDER BY (c.last_message_at IS NULL), c.last_message_at DESC, c.id DESC
-      LIMIT ${limitParam}`,
-    params,
-  );
+  let request = getSupabaseClient()
+    .from('conversations')
+    .select('*,channels(type,name),users!conversations_assignee_id_fkey(full_name,avatar_url)')
+    .eq('workspace_id', workspaceId);
+  if (status) request = request.eq('status', status);
+  if (channelType) request = request.eq('channels.type', channelType);
+  if (assigneeId === 'unassigned') request = request.is('assignee_id', null);
+  else if (assigneeId) request = request.eq('assignee_id', Number(assigneeId));
+  if (unreadOnly) request = request.gt('unread_count', 0);
+  if (search) {
+    const safeSearch = search.replace(/[,%()]/g, '');
+    request = request.or(
+      `contact_name.ilike.%${safeSearch}%,subject.ilike.%${safeSearch}%,last_message_preview.ilike.%${safeSearch}%`,
+    );
+  }
+  if (cursor) {
+    const cursorRow = await selectOne('conversations', 'id,last_message_at', { id: cursor, workspace_id: workspaceId });
+    if (cursorRow?.last_message_at) {
+      const timestamp = cursorRow.last_message_at;
+      request = request.or(`last_message_at.lt.${timestamp},and(last_message_at.eq.${timestamp},id.lt.${cursor})`);
+    } else {
+      request = request.is('last_message_at', null).lt('id', cursor);
+    }
+  }
+  const { data: rawRows, error } = await request
+    .order('last_message_at', { ascending: false, nullsFirst: false })
+    .order('id', { ascending: false })
+    .limit(limitParam);
+  if (error) throw error;
+  const rows = rawRows.map((row) => ({
+    ...row,
+    channel_type: row.channels?.type ?? null,
+    channel_name: row.channels?.name ?? null,
+    assignee_name: row.users?.full_name ?? null,
+    assignee_avatar_url: row.users?.avatar_url ?? null,
+  }));
 
   const last = rows[rows.length - 1];
   return {
@@ -162,26 +150,27 @@ export async function getConversationWithMessages(conversationId, workspaceId, {
   const conversation = await getConversationById(conversationId, workspaceId);
   if (!conversation) throw AppError.notFound('Conversation not found');
 
-  const messages = await query(
-    `SELECT m.*, u.full_name AS sender_display_name, u.avatar_url AS sender_display_avatar
-       FROM messages m
-       LEFT JOIN users u ON u.id = m.sender_id
-      WHERE m.conversation_id = ?
-        ${before ? 'AND m.id < ?' : ''}
-      ORDER BY m.sent_at DESC, m.id DESC
-      LIMIT ${Math.min(Number(limit) || 50, 200)}`,
-    before ? [conversationId, before] : [conversationId],
-  );
-
-  const notes = await query(
-    `SELECT n.*, u.full_name AS author_name, u.avatar_url AS author_avatar
-       FROM notes n
-       LEFT JOIN users u ON u.id = n.user_id
-      WHERE n.conversation_id = ?
-      ORDER BY n.created_at DESC
-      LIMIT 100`,
-    [conversationId],
-  );
+  const [messageRows, noteRows] = await Promise.all([
+    selectRows('messages', '*,users(full_name,avatar_url)', { conversation_id: conversationId }, {
+      ...(before ? { lt: { id: before } } : {}),
+      order: [{ column: 'sent_at', ascending: false }, { column: 'id', ascending: false }],
+      limit: Math.min(Number(limit) || 50, 200),
+    }),
+    selectRows('notes', '*,users(full_name,avatar_url)', { conversation_id: conversationId }, {
+      order: [{ column: 'created_at', ascending: false }],
+      limit: 100,
+    }),
+  ]);
+  const messages = messageRows.map((row) => ({
+    ...row,
+    sender_display_name: row.users?.full_name ?? null,
+    sender_display_avatar: row.users?.avatar_url ?? null,
+  }));
+  const notes = noteRows.map((row) => ({
+    ...row,
+    author_name: row.users?.full_name ?? null,
+    author_avatar: row.users?.avatar_url ?? null,
+  }));
 
   return {
     conversation: mapConversationSummary(conversation),
@@ -217,10 +206,10 @@ export async function ingestInboundMessage({ channel, payload }) {
   // 1. De-duplicate BEFORE creating anything. Webhooks are retried by Meta and
   //    our own widget may double-submit, so this must be the first concern.
   if (externalId) {
-    const existing = await queryOne(
-      'SELECT id, conversation_id FROM messages WHERE channel_id = ? AND external_id = ? LIMIT 1',
-      [channel.id, externalId],
-    );
+    const existing = await selectOne('messages', 'id,conversation_id', {
+      channel_id: channel.id,
+      external_id: externalId,
+    });
     if (existing) {
       log.debug({ externalId, channelId: channel.id }, 'Duplicate inbound message ignored');
       const conversation = await getConversationById(existing.conversation_id, channel.workspace_id);
@@ -234,63 +223,22 @@ export async function ingestInboundMessage({ channel, payload }) {
     contact: payload.contact,
   });
 
-  // 2 + 3. Write the message and bump the thread in one transaction.
-  let message;
-  try {
-    message = await withTransaction(async (client) => {
-      const insertResult = await txExecute(
-        client,
-        `INSERT INTO messages
-           (workspace_id, conversation_id, channel_id, external_id, direction, sender_type,
-            sender_name, body, attachments, status, sent_at, metadata)
-         VALUES (?, ?, ?, ?, 'inbound', 'contact', ?, ?, ?, 'delivered', ?, ?)`,
-        [
-          channel.workspace_id,
-          conversation.id,
-          channel.id,
-          externalId ?? null,
-          payload.contact?.name ?? conversation.contact_name ?? null,
-          payload.content?.text ?? '',
-          payload.content?.attachments?.length ? JSON.stringify(payload.content.attachments) : null,
-          payload.timestamp ?? new Date(),
-          payload.metadata ? JSON.stringify(payload.metadata) : null,
-        ],
-      );
-
-      // A new customer message reopens a thread that was closed or awaiting us.
-      const nextStatus = conversation.status === 'open' ? 'open' : 'open';
-      await txExecute(
-        client,
-        `UPDATE conversations SET
-            last_message_at        = ?,
-            last_message_preview   = ?,
-            last_message_direction = 'inbound',
-            unread_count           = unread_count + 1,
-            status                 = ?,
-            ai_message_count       = ai_message_count + 1,
-            subject                = COALESCE(subject, ?)
-          WHERE id = ?`,
-        [
-          payload.timestamp ?? new Date(),
-          (payload.content?.text ?? '').slice(0, 255),
-          nextStatus,
-          (payload.contact?.name ?? 'New conversation').slice(0, 255),
-          conversation.id,
-        ],
-      );
-
-      return txQuery(client, 'SELECT * FROM messages WHERE id = ?', [insertResult.insertId]);
-    });
-  } catch (error) {
-    // Lost a race with a concurrent webhook delivery: the unique key saved us.
-    if (error.code === 'ER_DUP_ENTRY') {
-      log.debug({ externalId }, 'Duplicate inbound message (unique key) ignored');
-      return { conversation, message: null, duplicate: true };
-    }
-    throw error;
+  const recorded = await callRpc('record_inbound_message', {
+    p_workspace_id: channel.workspace_id,
+    p_conversation_id: conversation.id,
+    p_channel_id: channel.id,
+    p_external_id: externalId ?? null,
+    p_sender_name: payload.contact?.name ?? conversation.contact_name ?? null,
+    p_body: payload.content?.text ?? '',
+    p_attachments: payload.content?.attachments?.length ? payload.content.attachments : null,
+    p_sent_at: payload.timestamp ?? new Date().toISOString(),
+    p_metadata: payload.metadata ?? null,
+    p_widget_key: channel.type === 'website' ? channel.config?.widgetKey ?? null : null,
+  });
+  if (recorded.duplicate) {
+    return { conversation, message: { id: recorded.message.id }, duplicate: true };
   }
-
-  const [messageRow] = message;
+  const messageRow = recorded.message;
 
   log.info(
     {
@@ -350,28 +298,22 @@ export async function insertOutboundMessage({
   intent = null,
   isAiHandover = false,
 }) {
-  const result = await execute(
-    `INSERT INTO messages
-       (workspace_id, conversation_id, channel_id, external_id, direction, sender_type,
-        sender_id, sender_name, body, attachments, status, intent, is_ai_handover, sent_at, metadata)
-     VALUES (?, ?, ?, ?, 'outbound', ?, ?, ?, ?, ?, ?, ?, ?, NOW(), ?)`,
-    [
-      conversation.workspace_id,
-      conversation.id,
-      channel.id,
-      externalId,
-      senderType,
-      senderId,
-      senderName,
-      body,
-      attachments.length ? JSON.stringify(attachments) : null,
-      status,
-      intent,
-      isAiHandover ? 1 : 0,
-      metadata ? JSON.stringify(metadata) : null,
-    ],
-  );
-  return queryOne('SELECT * FROM messages WHERE id = ?', [result.insertId]);
+  return insertRow('messages', {
+    workspace_id: conversation.workspace_id,
+    conversation_id: conversation.id,
+    channel_id: channel.id,
+    external_id: externalId,
+    direction: 'outbound',
+    sender_type: senderType,
+    sender_id: senderId,
+    sender_name: senderName,
+    body,
+    attachments: attachments.length ? attachments : null,
+    status,
+    intent,
+    is_ai_handover: isAiHandover,
+    metadata,
+  });
 }
 
 /**
@@ -441,11 +383,10 @@ export async function sendMessageToConversation({
   } catch (error) {
     const providerError = error.response?.data?.error;
     const failureMessage = providerError?.message ?? error.message;
-    await execute('UPDATE messages SET status = ?, error_message = ? WHERE id = ?', [
-      'failed',
-      String(failureMessage).slice(0, 500),
-      queued.id,
-    ]);
+    await updateRows('messages', {
+      status: 'failed',
+      error_message: String(failureMessage).slice(0, 500),
+    }, { id: queued.id });
     log.error(
       {
         workspaceId: conversation.workspace_id,
@@ -467,19 +408,17 @@ export async function sendMessageToConversation({
   }
 
   // 3. Record the result + first-response metrics.
-  const delivered = await queryOne('SELECT * FROM messages WHERE id = ?', [queued.id]);
-
-  await execute(
-    `UPDATE conversations SET
-        last_message_at        = NOW(),
-        last_message_preview   = ?,
-        last_message_direction = 'outbound',
-        first_response_at      = COALESCE(first_response_at, NOW()),
-        first_response_seconds = COALESCE(first_response_seconds,
-            TIMESTAMPDIFF(SECOND, created_at, NOW()))
-      WHERE id = ?`,
-    [body?.trim().slice(0, 255) ?? '', conversation.id],
-  );
+  const delivered = await selectOne('messages', '*', { id: queued.id });
+  const latest = await getConversationById(conversation.id, conversation.workspace_id);
+  const now = new Date();
+  await updateRows('conversations', {
+    last_message_at: now.toISOString(),
+    last_message_preview: body?.trim().slice(0, 255) ?? '',
+    last_message_direction: 'outbound',
+    first_response_at: latest.first_response_at ?? now.toISOString(),
+    first_response_seconds: latest.first_response_seconds
+      ?? Math.floor((now.getTime() - new Date(latest.created_at).getTime()) / 1000),
+  }, { id: conversation.id });
 
   incrementUsage(conversation.workspace_id, { messages: 1 }).catch(() => {});
 
@@ -514,14 +453,14 @@ const STATUSES = ['open', 'pending', 'closed'];
 export async function updateConversationStatus(conversation, status, userId = null) {
   if (!STATUSES.includes(status)) throw AppError.badRequest(`Status must be one of: ${STATUSES}`);
 
-  await execute(
-    `UPDATE conversations SET
-        status       = ?,
-        unread_count = IF(? = 'closed', 0, unread_count),
-        resolved_at  = CASE WHEN ? = 'closed' THEN COALESCE(resolved_at, NOW()) ELSE NULL END
-      WHERE id = ?`,
-    [status, status, status, conversation.id],
-  );
+  const changes = { status };
+  if (status === 'closed') {
+    changes.unread_count = 0;
+    changes.resolved_at = conversation.resolved_at ?? new Date().toISOString();
+  } else {
+    changes.resolved_at = null;
+  }
+  await updateRows('conversations', changes, { id: conversation.id });
 
   const updated = await getConversationById(conversation.id, conversation.workspace_id);
   emitToWorkspace(conversation.workspace_id, EVENTS.CONVERSATION_UPDATED, {
@@ -535,14 +474,15 @@ export async function updateConversationStatus(conversation, status, userId = nu
 /** Assigns (or unassigns) an agent. Only members of the same workspace count. */
 export async function assignConversation(conversation, assigneeId, userId = null) {
   if (assigneeId) {
-    const member = await queryOne(
-      `SELECT user_id FROM workspace_members WHERE workspace_id = ? AND user_id = ? AND status = 'active'`,
-      [conversation.workspace_id, assigneeId],
-    );
+    const member = await selectOne('workspace_members', 'user_id', {
+      workspace_id: conversation.workspace_id,
+      user_id: assigneeId,
+      status: 'active',
+    });
     if (!member) throw AppError.badRequest('That person is not a member of this workspace');
   }
 
-  await execute('UPDATE conversations SET assignee_id = ? WHERE id = ?', [assigneeId, conversation.id]);
+  await updateRows('conversations', { assignee_id: assigneeId }, { id: conversation.id });
   const updated = await getConversationById(conversation.id, conversation.workspace_id);
 
   emitToWorkspace(conversation.workspace_id, EVENTS.CONVERSATION_UPDATED, {
@@ -563,7 +503,7 @@ export async function assignConversation(conversation, assigneeId, userId = null
 /** Marks a thread as read for this agent (resets the unread badge). */
 export async function markConversationRead(conversation) {
   if (conversation.unread_count === 0) return conversation;
-  await execute('UPDATE conversations SET unread_count = 0 WHERE id = ?', [conversation.id]);
+  await updateRows('conversations', { unread_count: 0 }, { id: conversation.id });
   emitToWorkspace(conversation.workspace_id, EVENTS.CONVERSATION_READ, {
     conversationId: conversation.id,
   });
@@ -572,10 +512,11 @@ export async function markConversationRead(conversation) {
 
 /** Stops (or resumes) the AI on one thread. */
 export async function setAiHandover(conversation, handedOver, reason = null) {
-  await execute(
-    'UPDATE conversations SET ai_handover = ?, ai_handover_reason = ?, ai_handover_at = ? WHERE id = ?',
-    [handedOver ? 1 : 0, reason, handedOver ? new Date() : null, conversation.id],
-  );
+  await updateRows('conversations', {
+    ai_handover: handedOver,
+    ai_handover_reason: reason,
+    ai_handover_at: handedOver ? new Date().toISOString() : null,
+  }, { id: conversation.id });
   const updated = await getConversationById(conversation.id, conversation.workspace_id);
   emitToWorkspace(conversation.workspace_id, EVENTS.CONVERSATION_UPDATED, {
     conversationId: conversation.id,

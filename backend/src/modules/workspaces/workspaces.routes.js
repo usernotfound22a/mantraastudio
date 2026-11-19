@@ -12,7 +12,7 @@
  */
 import { Router } from 'express';
 import { z } from 'zod';
-import { query, queryOne, withTransaction, txExecute, txQuery } from '../../db/pool.js';
+import { selectRows, selectOne, updateRows, insertRow, deleteRows, callRpc } from '../../db/supabase.js';
 import { childLogger } from '../../config/logger.js';
 import { AppError, asyncHandler } from '../../middleware/error.js';
 import { validate } from '../../middleware/validate.js';
@@ -20,6 +20,7 @@ import { authenticate, loadWorkspace, requireAdmin, requireOwner } from '../../m
 import {
   countOwners,
   listAssignableAgents,
+  listMembershipsForUser,
   listMembersOfWorkspace,
 } from '../../services/membership.service.js';
 import { mapMembership } from '../auth/auth.service.js';
@@ -99,13 +100,7 @@ const workspaceRoute = (handler, ...middlewares) =>
 router.get(
   '/',
   asyncHandler(async (req, res) => {
-    const rows = await query(
-      `SELECT w.id, w.name, w.slug, w.logo_url, w.timezone, w.ai_enabled, m.role, m.joined_at
-         FROM workspace_members m
-         JOIN workspaces w ON w.id = m.workspace_id
-        WHERE m.user_id = ?`,
-      [req.user.id],
-    );
+    const rows = await listMembershipsForUser(req.user.id);
     res.json({ workspaces: rows.map(mapMembership) });
   }),
 );
@@ -116,27 +111,11 @@ router.post(
   validate(createWorkspaceSchema),
   asyncHandler(async (req, res) => {
     const { name } = req.body;
-    const workspace = await withTransaction(async (client) => {
-      const slug = await uniqueSlug(name, client);
-      const result = await txExecute(
-        client,
-        'INSERT INTO workspaces (name, slug, created_by, support_name) VALUES (?, ?, ?, ?)',
-        [name, slug, req.user.id, name],
-      );
-      await txExecute(
-        client,
-        `INSERT INTO workspace_members (workspace_id, user_id, role, status, joined_at)
-         VALUES (?, ?, 'owner', 'active', NOW())`,
-        [result.insertId, req.user.id],
-      );
-      await txExecute(
-        client,
-        `INSERT INTO subscriptions (workspace_id, plan, status) VALUES (?, 'free', 'active')`,
-        [result.insertId],
-      );
-      const [row] = await txQuery(client, 'SELECT * FROM workspaces WHERE id = ?', [result.insertId]);
-      return row;
+    const result = await callRpc('bootstrap_workspace', {
+      p_full_name: req.user.full_name,
+      p_workspace_name: name,
     });
+    const workspace = await selectOne('workspaces', '*', { slug: result.workspace.slug });
 
     log.info({ workspaceId: workspace.id, userId: req.user.id }, 'Workspace created');
     res.status(201).json({ workspace: { ...mapMembership({ ...workspace, role: 'owner' }) } });
@@ -154,33 +133,10 @@ router.post(
   validate(joinSchema),
   asyncHandler(async (req, res) => {
     const { slug, inviteCode } = req.body;
-    const workspace = await queryOne('SELECT * FROM workspaces WHERE slug = ?', [slug]);
-    if (!workspace) throw AppError.notFound('No workspace with that link');
-
-    const existing = await queryOne(
-      'SELECT * FROM workspace_members WHERE workspace_id = ? AND user_id = ?',
-      [workspace.id, req.user.id],
-    );
-
-    if (existing) {
-      if (existing.status === 'active') {
-        throw AppError.conflict('You are already a member of this workspace');
-      }
-      // Pending invite -> accept it.
-      await query(
-        `UPDATE workspace_members SET status = 'active', joined_at = NOW() WHERE id = ?`,
-        [existing.id],
-      );
-    } else {
-      if (!ALLOW_ANYONE_TO_JOIN && !inviteCode) {
-        throw AppError.forbidden('This workspace requires an invite code');
-      }
-      await query(
-        `INSERT INTO workspace_members (workspace_id, user_id, role, status, joined_at)
-         VALUES (?, ?, 'agent', 'active', NOW())`,
-        [workspace.id, req.user.id],
-      );
+    if (!ALLOW_ANYONE_TO_JOIN && !inviteCode) {
+      throw AppError.forbidden('This workspace requires an invite code');
     }
+    const workspace = await callRpc('join_workspace', { p_slug: slug, p_invite_code: inviteCode ?? null });
 
     log.info({ workspaceId: workspace.id, userId: req.user.id }, 'User joined workspace');
     res.json({ workspace: mapMembership({ ...workspace, role: 'agent' }) });
@@ -209,27 +165,15 @@ router.patch(
   workspaceRoute(
     asyncHandler(async (req, res) => {
       const body = req.body;
-      await query(
-        `UPDATE workspaces SET
-            name           = COALESCE(?, name),
-            logo_url       = COALESCE(?, logo_url),
-            timezone       = COALESCE(?, timezone),
-            support_name   = COALESCE(?, support_name),
-            ai_enabled     = COALESCE(?, ai_enabled),
-            ai_auto_send   = COALESCE(?, ai_auto_send),
-            business_hours = COALESCE(?, business_hours)
-          WHERE id = ?`,
-        [
-          body.name ?? null,
-          body.logoUrl ?? null,
-          body.timezone ?? null,
-          body.supportName ?? null,
-          body.aiEnabled === undefined ? null : body.aiEnabled ? 1 : 0,
-          body.aiAutoSend === undefined ? null : body.aiAutoSend ? 1 : 0,
-          body.businessHours ? JSON.stringify(body.businessHours) : null,
-          req.workspace.id,
-        ],
-      );
+      const changes = {};
+      if (body.name !== undefined) changes.name = body.name;
+      if (body.logoUrl != null) changes.logo_url = body.logoUrl;
+      if (body.timezone !== undefined) changes.timezone = body.timezone;
+      if (body.supportName != null) changes.support_name = body.supportName;
+      if (body.aiEnabled !== undefined) changes.ai_enabled = body.aiEnabled ? 1 : 0;
+      if (body.aiAutoSend !== undefined) changes.ai_auto_send = body.aiAutoSend ? 1 : 0;
+      if (body.businessHours != null) changes.business_hours = body.businessHours;
+      if (Object.keys(changes).length) await updateRows('workspaces', changes, { id: req.workspace.id });
       res.json(await workspacePayload(req));
     }),
     requireAdmin,
@@ -274,23 +218,26 @@ router.post(
   workspaceRoute(
     asyncHandler(async (req, res) => {
       const { email, role } = req.body;
-      const user = await queryOne('SELECT id, email FROM users WHERE email = ?', [email]);
+      const user = await selectOne('users', 'id,email', { email });
       if (!user) throw AppError.notFound(`No SocialHub account found for ${email}`);
 
-      const existing = await queryOne(
-        'SELECT id FROM workspace_members WHERE workspace_id = ? AND user_id = ?',
-        [req.workspace.id, user.id],
-      );
+      const existing = await selectOne('workspace_members', 'id', {
+        workspace_id: req.workspace.id,
+        user_id: user.id,
+      });
       if (existing) throw AppError.conflict(`${email} is already a member of this workspace`);
       if (role === 'owner' && req.member.role !== 'owner') {
         throw AppError.forbidden('Only an owner can add another owner');
       }
 
-      await query(
-        `INSERT INTO workspace_members (workspace_id, user_id, role, status, invited_by, joined_at)
-         VALUES (?, ?, ?, 'active', ?, NOW())`,
-        [req.workspace.id, user.id, role, req.user.id],
-      );
+      await insertRow('workspace_members', {
+        workspace_id: req.workspace.id,
+        user_id: user.id,
+        role,
+        status: 'active',
+        invited_by: req.user.id,
+        joined_at: new Date().toISOString(),
+      });
       log.info({ workspaceId: req.workspace.id, addedUserId: user.id, role }, 'Member added');
 
       // The new member's open tabs should switch to this workspace rather than
@@ -316,15 +263,12 @@ router.patch(
       const { memberId } = req.params;
       const { role } = req.body;
 
-      const member = await queryOne(
-        'SELECT * FROM workspace_members WHERE id = ? AND workspace_id = ?',
-        [memberId, req.workspace.id],
-      );
+      const member = await selectOne('workspace_members', '*', { id: memberId, workspace_id: req.workspace.id });
       if (!member) throw AppError.notFound('Member not found');
       if (member.user_id === req.user.id) throw AppError.forbidden('You cannot change your own role');
       if (member.role === 'owner' && role !== 'owner') await assertNotLastOwner(req.workspace.id);
 
-      await query('UPDATE workspace_members SET role = ? WHERE id = ?', [role, memberId]);
+      await updateRows('workspace_members', { role }, { id: memberId, workspace_id: req.workspace.id });
       log.info({ workspaceId: req.workspace.id, memberId, role }, 'Member role updated');
 
       // The team list is shared, and a role change can lock someone out of the
@@ -347,10 +291,7 @@ router.delete(
   workspaceRoute(
     asyncHandler(async (req, res) => {
       const { memberId } = req.params;
-      const member = await queryOne(
-        'SELECT * FROM workspace_members WHERE id = ? AND workspace_id = ?',
-        [memberId, req.workspace.id],
-      );
+      const member = await selectOne('workspace_members', '*', { id: memberId, workspace_id: req.workspace.id });
       if (!member) throw AppError.notFound('Member not found');
       if (member.user_id === req.user.id) {
         throw AppError.badRequest('Use the leave endpoint to remove yourself');
@@ -360,7 +301,7 @@ router.delete(
       }
       if (member.role === 'owner') await assertNotLastOwner(req.workspace.id);
 
-      await query('DELETE FROM workspace_members WHERE id = ?', [memberId]);
+      await deleteRows('workspace_members', { id: memberId, workspace_id: req.workspace.id });
       // The removed user's own tabs must drop this workspace, so the event also
       // goes to their personal room.
       emitToUser(member.user_id, EVENTS.MEMBER_REMOVED, {
@@ -384,7 +325,7 @@ router.post(
   workspaceRoute(
     asyncHandler(async (req, res) => {
       if (req.member.role === 'owner') await assertNotLastOwner(req.workspace.id);
-      await query('DELETE FROM workspace_members WHERE id = ?', [req.member.id]);
+      await deleteRows('workspace_members', { id: req.member.id, workspace_id: req.workspace.id });
       res.json({ success: true });
     }),
   ),
@@ -396,17 +337,16 @@ router.delete(
   validate({ params: workspaceIdParam }),
   workspaceRoute(
     asyncHandler(async (req, res) => {
-      const counts = await queryOne(
-        `SELECT (SELECT COUNT(*) FROM conversations WHERE workspace_id = ?) AS conversations,
-                (SELECT COUNT(*) FROM messages WHERE workspace_id = ?)     AS messages`,
-        [req.workspace.id, req.workspace.id],
-      );
-      if (counts.conversations > 0 || counts.messages > 0) {
+      const [conversations, messages] = await Promise.all([
+        selectRows('conversations', 'id', { workspace_id: req.workspace.id }, { limit: 1 }),
+        selectRows('messages', 'id', { workspace_id: req.workspace.id }, { limit: 1 }),
+      ]);
+      if (conversations.length > 0 || messages.length > 0) {
         throw AppError.conflict(
           'This workspace already has conversations. Archive it instead of deleting it.',
         );
       }
-      await query('DELETE FROM workspaces WHERE id = ?', [req.workspace.id]);
+      await deleteRows('workspaces', { id: req.workspace.id });
       log.info({ workspaceId: req.workspace.id }, 'Workspace deleted');
       res.json({ success: true });
     }),
@@ -428,10 +368,10 @@ async function assertNotLastOwner(workspaceId) {
 
 /** Single response shape for the workspace + team + plan. */
 async function workspacePayload(req) {
-  const workspace = await queryOne('SELECT * FROM workspaces WHERE id = ?', [req.workspace.id]);
+  const workspace = await selectOne('workspaces', '*', { id: req.workspace.id });
   const [members, subscription] = await Promise.all([
     listMembersOfWorkspace(req.workspace.id),
-    queryOne('SELECT * FROM subscriptions WHERE workspace_id = ?', [req.workspace.id]),
+    selectOne('subscriptions', '*', { workspace_id: req.workspace.id }),
   ]);
 
   return {
@@ -456,17 +396,6 @@ async function workspacePayload(req) {
 }
 
 /** "My Shop" -> "my-shop", adding -2, -3 ... when the slug is taken. */
-async function uniqueSlug(name, client) {
-  const base =
-    name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'workspace';
-  const rows = await txQuery(
-    client,
-    'SELECT slug FROM workspaces WHERE slug = ? OR slug LIKE ?',
-    [base, `${base}-%`],
-  );
-  return rows.length === 0 ? base : `${base}-${rows.length + 1}`;
-}
-
 /** DB membership+user row -> API shape. */
 export function mapMemberRow(row) {
   return {

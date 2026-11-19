@@ -13,7 +13,7 @@
  *   1. set TELEGRAM_BOT_TOKEN in backend/.env
  *   2. add TELEGRAM_BOT_TOKEN to env.js
  *   3. point a Telegram webhook at POST /api/webhooks/telegram
- *   4. restart the API - the loader discovers this folder automatically
+ *   4. restart the API - the bundled adapter is registered at startup
  *   5. POST /api/channels { "type": "telegram", "name": "...",
  *                          "config": { "botToken": "..." } }
  */
@@ -23,6 +23,7 @@ import { AppError } from '../../src/middleware/error.js';
 const API = 'https://api.telegram.org';
 
 export default class TelegramAdapter extends BaseAdapter {
+  static pluginName = 'Telegram';
   static type = 'telegram';
   static label = 'Telegram';
   static description = 'Telegram bot channel via the Bot API.';

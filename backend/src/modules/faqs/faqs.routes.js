@@ -17,7 +17,7 @@ import { z } from 'zod';
 import { authenticate, loadWorkspace, requireRole } from '../../middleware/auth.js';
 import { validate, queryOf } from '../../middleware/validate.js';
 import { asyncHandler, AppError } from '../../middleware/error.js';
-import { query, queryOne, execute } from '../../db/pool.js';
+import { selectRows, selectOne, insertRow, updateRows, deleteRows } from '../../db/supabase.js';
 import { searchFaqs, listUnansweredQuestions } from '../../services/faq.service.js';
 import { emitToWorkspace } from '../../services/socket.service.js';
 import { EVENTS } from '../../services/events.js';
@@ -44,10 +44,7 @@ const mapFaq = (faq) => ({
 
 /** Loads an FAQ scoped to the workspace. */
 async function ownedFaq(req) {
-  const faq = await queryOne('SELECT * FROM faqs WHERE id = ? AND workspace_id = ?', [
-    req.params.faqId,
-    req.workspace.id,
-  ]);
+  const faq = await selectOne('faqs', '*', { id: req.params.faqId, workspace_id: req.workspace.id });
   if (!faq) throw AppError.notFound('FAQ not found');
   return faq;
 }
@@ -70,32 +67,27 @@ router.get(
   asyncHandler(async (req, res) => {
     const { search, category, includeArchived } = queryOf(req);
 
-    const where = ['workspace_id = ?'];
-    const params = [req.workspace.id];
-    if (includeArchived !== 'true') where.push('is_active = 1');
-    if (category) {
-      where.push('category = ?');
-      params.push(category);
-    }
-    if (search) {
-      where.push('(question LIKE ? OR answer LIKE ?)');
-      params.push(`%${search}%`, `%${search}%`);
-    }
-
-    const faqs = await query(
-      `SELECT * FROM faqs WHERE ${where.join(' AND ')} ORDER BY match_count DESC, created_at DESC LIMIT 500`,
-      params,
-    );
+    const filters = { workspace_id: req.workspace.id };
+    if (includeArchived !== 'true') filters.is_active = 1;
+    if (category) filters.category = category;
+    const faqs = await selectRows('faqs', '*', filters, {
+      ...(search ? {
+        or: `question.ilike.%${search.replace(/[,%()]/g, '')}%,answer.ilike.%${search.replace(/[,%()]/g, '')}%`,
+      } : {}),
+      order: [{ column: 'match_count', ascending: false }, { column: 'created_at', ascending: false }],
+      limit: 500,
+    });
 
     // Distinct categories for the filter dropdown, in one extra query.
-    const categories = await query(
-      'SELECT DISTINCT category FROM faqs WHERE workspace_id = ? AND category IS NOT NULL ORDER BY category',
-      [req.workspace.id],
-    );
+    const categoryRows = await selectRows('faqs', 'category', { workspace_id: req.workspace.id }, {
+      not: [['category', 'is', null]],
+      order: [{ column: 'category', ascending: true }],
+    });
+    const categories = [...new Set(categoryRows.map((row) => row.category).filter(Boolean))];
 
     res.json({
       faqs: faqs.map(mapFaq),
-      categories: categories.map((row) => row.category),
+      categories,
     });
   }),
 );
@@ -110,20 +102,16 @@ router.get(
   authenticate,
   loadWorkspace,
   asyncHandler(async (req, res) => {
-    const faqs = await query(
-      `SELECT id, question, category, match_count, no_match_count, last_matched_at
-         FROM faqs
-        WHERE workspace_id = ? AND is_active = 1
-        ORDER BY match_count DESC, last_matched_at DESC
-        LIMIT 10`,
-      [req.workspace.id],
-    );
-    const unused = await query(
-      `SELECT id, question, category FROM faqs
-        WHERE workspace_id = ? AND is_active = 1 AND match_count = 0
-        ORDER BY created_at DESC LIMIT 10`,
-      [req.workspace.id],
-    );
+    const faqs = await selectRows('faqs', 'id,question,category,match_count,no_match_count,last_matched_at',
+      { workspace_id: req.workspace.id, is_active: 1 }, {
+        order: [{ column: 'match_count', ascending: false }, { column: 'last_matched_at', ascending: false }],
+        limit: 10,
+      });
+    const unused = await selectRows('faqs', 'id,question,category',
+      { workspace_id: req.workspace.id, is_active: 1, match_count: 0 }, {
+        order: [{ column: 'created_at', ascending: false }],
+        limit: 10,
+      });
     res.json({ mostUsed: faqs, neverMatched: unused });
   }),
 );
@@ -196,20 +184,22 @@ router.post(
     }),
   }),
   asyncHandler(async (req, res) => {
-    const missing = await queryOne(
-      'SELECT * FROM unanswered_questions WHERE id = ? AND workspace_id = ?',
-      [req.params.id, req.workspace.id],
-    );
+    const missing = await selectOne('unanswered_questions', '*', {
+      id: req.params.id,
+      workspace_id: req.workspace.id,
+    });
     if (!missing) throw AppError.notFound('That unanswered question no longer exists');
 
-    const created = await execute(
-      `INSERT INTO faqs (workspace_id, question, answer, category, source, created_by)
-       VALUES (?, ?, ?, ?, 'learned', ?)`,
-      [req.workspace.id, missing.question, req.body.answer, req.body.category ?? 'General', req.user.id],
-    );
-    await execute('DELETE FROM unanswered_questions WHERE id = ?', [missing.id]);
+    const faq = await insertRow('faqs', {
+      workspace_id: req.workspace.id,
+      question: missing.question,
+      answer: req.body.answer,
+      category: req.body.category ?? 'General',
+      source: 'learned',
+      created_by: req.user.id,
+    });
+    await deleteRows('unanswered_questions', { id: missing.id });
 
-    const faq = await queryOne('SELECT * FROM faqs WHERE id = ?', [created.insertId]);
     emitToWorkspace(req.workspace.id, EVENTS.FAQ_CREATED, { faq: mapFaq(faq) });
     res.status(201).json({ faq: mapFaq(faq), resolvedFrom: missing.question });
   }),
@@ -235,12 +225,16 @@ router.post(
   }),
   asyncHandler(async (req, res) => {
     const { question, answer, keywords, tags, category } = req.body;
-    const result = await execute(
-      `INSERT INTO faqs (workspace_id, question, answer, keywords, tags, category, source, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, 'manual', ?)`,
-      [req.workspace.id, question, answer, JSON.stringify(keywords), JSON.stringify(tags), category ?? null, req.user.id],
-    );
-    const created = mapFaq(await queryOne('SELECT * FROM faqs WHERE id = ?', [result.insertId]));
+    const created = mapFaq(await insertRow('faqs', {
+      workspace_id: req.workspace.id,
+      question,
+      answer,
+      keywords,
+      tags,
+      category: category ?? null,
+      source: 'manual',
+      created_by: req.user.id,
+    }));
     // The knowledge base is shared, so every other tab's settings page refreshes.
     emitToWorkspace(req.workspace.id, EVENTS.FAQ_CREATED, { faq: created });
     res.status(201).json({ faq: created });
@@ -290,19 +284,16 @@ router.post(
 
     for (const [index, entry] of entries.entries()) {
       try {
-        await execute(
-          `INSERT INTO faqs (workspace_id, question, answer, keywords, tags, category, source, created_by)
-           VALUES (?, ?, ?, ?, ?, ?, 'imported', ?)`,
-          [
-            req.workspace.id,
-            entry.question,
-            entry.answer,
-            JSON.stringify(entry.keywords ?? []),
-            JSON.stringify([]),
-            entry.category ?? null,
-            req.user.id,
-          ],
-        );
+        await insertRow('faqs', {
+          workspace_id: req.workspace.id,
+          question: entry.question,
+          answer: entry.answer,
+          keywords: entry.keywords ?? [],
+          tags: [],
+          category: entry.category ?? null,
+          source: 'imported',
+          created_by: req.user.id,
+        });
         imported += 1;
       } catch (error) {
         errors.push({ row: index + 1, question: entry.question?.slice(0, 80), error: error.message });
@@ -390,8 +381,7 @@ router.patch(
   asyncHandler(async (req, res) => {
     const faq = await ownedFaq(req);
 
-    const fields = [];
-    const params = [];
+    const changes = {};
     for (const [key, column] of [
       ['question', 'question'],
       ['answer', 'answer'],
@@ -399,24 +389,17 @@ router.patch(
       ['tags', 'tags'],
     ]) {
       if (req.body[key] !== undefined) {
-        fields.push(`${column} = ?`);
-        params.push(JSON.stringify(req.body[key]));
+        changes[column] = req.body[key];
       }
     }
     if (req.body.category !== undefined) {
-      fields.push('category = ?');
-      params.push(req.body.category);
+      changes.category = req.body.category;
     }
     if (req.body.isActive !== undefined) {
-      fields.push('is_active = ?');
-      params.push(req.body.isActive ? 1 : 0);
+      changes.is_active = req.body.isActive ? 1 : 0;
     }
-
-    await execute(`UPDATE faqs SET ${fields.join(', ')}, updated_at = NOW() WHERE id = ?`, [
-      ...params,
-      faq.id,
-    ]);
-    const updated = mapFaq(await queryOne('SELECT * FROM faqs WHERE id = ?', [faq.id]));
+    const [updatedRow] = await updateRows('faqs', changes, { id: faq.id });
+    const updated = mapFaq(updatedRow);
     emitToWorkspace(req.workspace.id, EVENTS.FAQ_UPDATED, { faq: updated });
     res.json({ faq: updated });
   }),
@@ -431,14 +414,11 @@ router.delete(
   validate({ params: idParam }),
   asyncHandler(async (req, res) => {
     const faq = await ownedFaq(req);
-    const referenced = await queryOne(
-      'SELECT COUNT(*) AS total FROM conversations WHERE ai_last_faq_id = ?',
-      [faq.id],
-    );
+    const referenced = await selectRows('conversations', 'id', { ai_last_faq_id: faq.id }, { limit: 1 });
 
-    if (referenced.total > 0) {
-      await execute('UPDATE faqs SET is_active = 0, updated_at = NOW() WHERE id = ?', [faq.id]);
-      const archived = mapFaq(await queryOne('SELECT * FROM faqs WHERE id = ?', [faq.id]));
+    if (referenced.length > 0) {
+      const [archivedRow] = await updateRows('faqs', { is_active: 0 }, { id: faq.id });
+      const archived = mapFaq(archivedRow);
       // Same event either way: the entry is gone from the AI's point of view,
       // whether it was archived or hard-deleted.
       emitToWorkspace(req.workspace.id, EVENTS.FAQ_DELETED, { faqId: faq.id, archived: true });
@@ -449,7 +429,7 @@ router.delete(
       });
     }
 
-    await execute('DELETE FROM faqs WHERE id = ?', [faq.id]);
+    await deleteRows('faqs', { id: faq.id });
     emitToWorkspace(req.workspace.id, EVENTS.FAQ_DELETED, { faqId: faq.id, archived: false });
     return res.sendStatus(204);
   }),
@@ -463,11 +443,12 @@ router.post(
   validate({ params: idParam }),
   asyncHandler(async (req, res) => {
     const faq = await ownedFaq(req);
-    await execute(
-      'UPDATE faqs SET match_count = 0, no_match_count = 0, last_matched_at = NULL WHERE id = ?',
-      [faq.id],
+    const [updatedRow] = await updateRows(
+      'faqs',
+      { match_count: 0, no_match_count: 0, last_matched_at: null },
+      { id: faq.id },
     );
-    const updated = mapFaq(await queryOne('SELECT * FROM faqs WHERE id = ?', [faq.id]));
+    const updated = mapFaq(updatedRow);
     emitToWorkspace(req.workspace.id, EVENTS.FAQ_UPDATED, { faq: updated });
     res.json({ faq: updated });
   }),

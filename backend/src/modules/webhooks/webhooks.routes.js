@@ -33,10 +33,16 @@ import { AppError, asyncHandler } from '../../middleware/error.js';
 import { env } from '../../config/env.js';
 import { childLogger } from '../../config/logger.js';
 import { getMetaSettings } from '../../services/meta-settings.service.js';
+import { getAdminClient, withSupabaseClient } from '../../db/supabase.js';
 
 const log = childLogger('webhooks');
 
 const router = Router();
+
+// Signed provider webhooks are trusted server-to-server traffic and have no
+// Supabase Auth bearer token. Keep the privileged context limited to this
+// dedicated router; dashboard requests continue through caller-JWT RLS.
+router.use((req, res, next) => withSupabaseClient(getAdminClient(), next));
 
 /**
  * Meta signs the body, so we need the EXACT bytes - not the parsed object.

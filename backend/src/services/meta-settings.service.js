@@ -1,5 +1,5 @@
 /** Encrypted, server-wide Meta credentials configured from the admin panel. */
-import { query, withTransaction, txExecute } from '../db/pool.js';
+import { getAdminClient, callRpc } from '../db/supabase.js';
 import { env } from '../config/env.js';
 import { childLogger } from '../config/logger.js';
 import { AppError } from '../middleware/error.js';
@@ -22,10 +22,11 @@ export const isMetaConfigured = () => Boolean(current.appId && current.appSecret
 /** Loads encrypted DB values at boot, falling back to environment configuration. */
 export async function loadMetaSettings() {
   try {
-    const rows = await query(
-      'SELECT setting_key, setting_value FROM system_settings WHERE setting_key IN (?, ?)',
-      [APP_ID_KEY, APP_SECRET_KEY],
-    );
+    const { data: rows, error } = await getAdminClient()
+      .from('system_settings')
+      .select('setting_key,setting_value')
+      .in('setting_key', [APP_ID_KEY, APP_SECRET_KEY]);
+    if (error) throw error;
     const stored = Object.fromEntries(rows.map((row) => [row.setting_key, decryptSecret(row.setting_value)]));
     current = {
       appId: stored[APP_ID_KEY] ?? current.appId,
@@ -40,7 +41,7 @@ export async function loadMetaSettings() {
 }
 
 /** Stores both values encrypted and atomically, never returning the secret. */
-export async function saveMetaSettings({ appId, appSecret, updatedBy }) {
+export async function saveMetaSettings({ appId, appSecret, updatedBy, workspaceId }) {
   const normalizedAppId = String(appId ?? '').trim();
   const normalizedSecret = String(appSecret ?? '').trim();
   const nextSecret = normalizedSecret || current.appSecret;
@@ -51,18 +52,10 @@ export async function saveMetaSettings({ appId, appSecret, updatedBy }) {
     throw AppError.badRequest('Meta credentials exceed the maximum allowed length');
   }
 
-  await withTransaction(async (connection) => {
-    const settings = [[APP_ID_KEY, normalizedAppId]];
-    if (normalizedSecret) settings.push([APP_SECRET_KEY, normalizedSecret]);
-    for (const [settingKey, value] of settings) {
-      await txExecute(
-        connection,
-        `INSERT INTO system_settings (setting_key, setting_value, updated_by)
-         VALUES (?, ?, ?)
-         ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value), updated_by = VALUES(updated_by), updated_at = NOW()`,
-        [settingKey, encryptSecret(value), updatedBy ?? null],
-      );
-    }
+  await callRpc('save_meta_settings', {
+    p_workspace_id: workspaceId,
+    p_app_id_encrypted: encryptSecret(normalizedAppId),
+    p_app_secret_encrypted: encryptSecret(normalizedSecret || current.appSecret),
   });
 
   current = { appId: normalizedAppId, appSecret: nextSecret };

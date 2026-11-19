@@ -10,7 +10,8 @@
  * reach a workspace other than the one it was issued for.
  */
 import { asyncHandler, AppError } from './error.js';
-import { authenticateApiKey, requireScope } from '../services/apikey.service.js';
+import { authenticateApiKey, hashApiKey, requireScope } from '../services/apikey.service.js';
+import { createApiKeyClient, withSupabaseClient } from '../db/supabase.js';
 
 /** Pulls the raw key out of `Authorization: Bearer ...` or `X-Api-Key`. */
 function extractKey(req) {
@@ -36,7 +37,10 @@ export const authenticateApiKeyMiddleware = asyncHandler(async (req, res, next) 
   req.api = principal;
   // Route handlers use this exactly like req.workspace.id elsewhere in the app.
   req.workspaceId = principal.workspaceId;
-  next();
+  // API-key principals are workspace-bound and every route additionally checks
+  // its declared scopes. This context is isolated to the dedicated v1 router;
+  // dashboard routes continue to use the caller's Auth JWT and RLS.
+  withSupabaseClient(createApiKeyClient(hashApiKey(raw)), next);
 });
 
 /** Requires a specific scope on the presented key. */

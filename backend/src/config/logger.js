@@ -9,7 +9,7 @@ export const logger = pino({
   level: env.LOG_LEVEL,
   base: { service: 'socialhub-api' },
   // Only pay the pretty-print cost outside production.
-  transport: env.isProd
+  transport: env.isProd || process.env.VERCEL
     ? undefined
     : {
         target: 'pino-pretty',

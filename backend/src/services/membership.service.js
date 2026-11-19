@@ -1,64 +1,65 @@
-/**
- * Workspace membership lookups.
- *
- * Shared by the auth middleware and the workspaces module so the
- * "is this user allowed to touch this tenant?" question has exactly one
- * implementation.
- */
-import { query, queryOne } from '../db/pool.js';
+import { selectRows, selectOne } from '../db/supabase.js';
 
-/** Every workspace the user belongs to, with their role. */
-export const listMembershipsForUser = (userId) =>
-  query(
-    `SELECT w.id, w.name, w.slug, w.logo_url, w.timezone, w.ai_enabled,
-            m.role, m.status, m.joined_at
-       FROM workspace_members m
-       JOIN workspaces w ON w.id = m.workspace_id
-      WHERE m.user_id = ?
-      ORDER BY FIELD(m.role, 'owner', 'admin', 'agent'), w.name ASC`,
-    [userId],
-  );
+const roleOrder = { owner: 0, admin: 1, agent: 2 };
 
-/**
- * Finds a membership row or null.
- * @returns {Promise<{id:number, workspace_id:number, user_id:number, role:string, status:string}|null>}
- */
-export const findMembership = (userId, workspaceId) =>
-  queryOne(
-    `SELECT id, workspace_id, user_id, role, status, joined_at
-       FROM workspace_members
-      WHERE user_id = ? AND workspace_id = ?
-      LIMIT 1`,
-    [userId, workspaceId],
+export async function listMembershipsForUser(userId) {
+  const memberships = await selectRows('workspace_members', '*', { user_id: userId });
+  const rows = await Promise.all(
+    memberships.map(async (membership) => {
+      const workspace = await selectOne('workspaces', '*', { id: membership.workspace_id });
+      return workspace ? { ...workspace, ...membership } : null;
+    }),
   );
+  return rows
+    .filter(Boolean)
+    .sort((a, b) => roleOrder[a.role] - roleOrder[b.role] || a.name.localeCompare(b.name));
+}
 
-/** Memberships for a workspace, joined with the user profile. */
-export const listMembersOfWorkspace = (workspaceId) =>
-  query(
-    `SELECT m.id, m.role, m.status, m.invited_at, m.joined_at,
-            u.id AS user_id, u.email, u.full_name, u.avatar_url, u.job_title, u.last_login_at
-       FROM workspace_members m
-       JOIN users u ON u.id = m.user_id
-      WHERE m.workspace_id = ?
-      ORDER BY FIELD(m.role, 'owner', 'admin', 'agent'), u.full_name ASC`,
-    [workspaceId],
-  );
+export const findMembership = async (userId, workspaceId) =>
+  selectOne('workspace_members', '*', { user_id: userId, workspace_id: workspaceId });
 
-/** How many owners a workspace has (protects against removing the last one). */
-export const countOwners = (workspaceId) =>
-  queryOne(
-    `SELECT COUNT(*) AS total FROM workspace_members
-      WHERE workspace_id = ? AND role = 'owner' AND status = 'active'`,
-    [workspaceId],
+export async function listMembersOfWorkspace(workspaceId) {
+  const memberships = await selectRows(
+    'workspace_members',
+    '*',
+    { workspace_id: workspaceId },
   );
+  const rows = await Promise.all(
+    memberships.map(async (membership) => {
+      const user = await selectOne(
+        'users',
+        'id,email,full_name,avatar_url,job_title,last_login_at',
+        { id: membership.user_id },
+      );
+      return user ? { ...membership, ...user, user_id: user.id } : null;
+    }),
+  );
+  return rows
+    .filter(Boolean)
+    .sort((a, b) => roleOrder[a.role] - roleOrder[b.role] || a.full_name.localeCompare(b.full_name));
+}
 
-/** Agents that can be assigned to a conversation. */
-export const listAssignableAgents = (workspaceId) =>
-  query(
-    `SELECT u.id, u.full_name, u.email, u.avatar_url, m.role
-       FROM workspace_members m
-       JOIN users u ON u.id = m.user_id
-      WHERE m.workspace_id = ? AND m.status = 'active'
-      ORDER BY u.full_name ASC`,
-    [workspaceId],
+export async function countOwners(workspaceId) {
+  const owners = await selectRows('workspace_members', 'id', {
+    workspace_id: workspaceId,
+    role: 'owner',
+    status: 'active',
+  });
+  return { total: owners.length };
+}
+
+export async function listAssignableAgents(workspaceId) {
+  const memberships = await selectRows('workspace_members', '*', {
+    workspace_id: workspaceId,
+    status: 'active',
+  });
+  const rows = await Promise.all(
+    memberships.map(async (membership) => {
+      const user = await selectOne('users', 'id,full_name,email,avatar_url', {
+        id: membership.user_id,
+      });
+      return user ? { ...user, role: membership.role } : null;
+    }),
   );
+  return rows.filter(Boolean).sort((a, b) => a.full_name.localeCompare(b.full_name));
+}

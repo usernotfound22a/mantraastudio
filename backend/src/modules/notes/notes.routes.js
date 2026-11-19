@@ -15,7 +15,7 @@ import { z } from 'zod';
 import { authenticate, loadWorkspace, requireRole } from '../../middleware/auth.js';
 import { validate } from '../../middleware/validate.js';
 import { asyncHandler, AppError } from '../../middleware/error.js';
-import { query, queryOne, execute } from '../../db/pool.js';
+import { getSupabaseClient, selectRows, selectOne, insertRow, updateRows, deleteRows } from '../../db/supabase.js';
 import { emitToConversation } from '../../services/socket.service.js';
 import { EVENTS } from '../../services/events.js';
 
@@ -28,10 +28,11 @@ const noteParams = z.object({
 
 /** Loads a note and proves it belongs to the caller's workspace. */
 async function ownedNote(req) {
-  const note = await queryOne(
-    'SELECT * FROM notes WHERE id = ? AND conversation_id = ? AND workspace_id = ?',
-    [req.params.noteId, req.params.conversationId, req.workspace.id],
-  );
+  const note = await selectOne('notes', '*', {
+    id: req.params.noteId,
+    conversation_id: req.params.conversationId,
+    workspace_id: req.workspace.id,
+  });
   if (!note) throw AppError.notFound('Note not found');
   return note;
 }
@@ -56,11 +57,19 @@ const mapNote = (note) => ({
   updatedAt: note.updated_at,
 });
 
-const SELECT_NOTE = `
-  SELECT n.*, u.full_name AS author_name, u.avatar_url AS author_avatar
-    FROM notes n
-    LEFT JOIN users u ON u.id = n.user_id
-   WHERE n.id = ?`;
+async function selectNoteWithAuthor(id) {
+  const { data, error } = await getSupabaseClient()
+    .from('notes')
+    .select('*,users(full_name,avatar_url)')
+    .eq('id', id)
+    .single();
+  if (error) throw error;
+  return {
+    ...data,
+    author_name: data.users?.full_name ?? null,
+    author_avatar: data.users?.avatar_url ?? null,
+  };
+}
 
 // ---------------------------------------------------------------------------
 
@@ -72,16 +81,19 @@ router.get(
     params: z.object({ conversationId: z.coerce.number().int().positive() }),
   }),
   asyncHandler(async (req, res) => {
-    const notes = await query(
-      `SELECT n.*, u.full_name AS author_name, u.avatar_url AS author_avatar
-         FROM notes n
-         LEFT JOIN users u ON u.id = n.user_id
-        WHERE n.conversation_id = ? AND n.workspace_id = ?
-        ORDER BY n.pinned DESC, n.created_at DESC
-        LIMIT 200`,
-      [req.params.conversationId, req.workspace.id],
-    );
-    res.json({ notes: notes.map(mapNote) });
+    const notes = await selectRows('notes', '*,users(full_name,avatar_url)', {
+      conversation_id: req.params.conversationId,
+      workspace_id: req.workspace.id,
+    }, {
+      order: [{ column: 'pinned', ascending: false }, { column: 'created_at', ascending: false }],
+      limit: 200,
+    });
+    const normalized = notes.map((note) => ({
+      ...note,
+      author_name: note.users?.full_name ?? null,
+      author_avatar: note.users?.avatar_url ?? null,
+    }));
+    res.json({ notes: normalized.map(mapNote) });
   }),
 );
 
@@ -99,10 +111,10 @@ router.post(
   }),
   asyncHandler(async (req, res) => {
     // Confirm the conversation is real in this workspace before writing.
-    const conversation = await queryOne(
-      'SELECT id FROM conversations WHERE id = ? AND workspace_id = ?',
-      [req.params.conversationId, req.workspace.id],
-    );
+    const conversation = await selectOne('conversations', 'id', {
+      id: req.params.conversationId,
+      workspace_id: req.workspace.id,
+    });
     if (!conversation) throw AppError.notFound('Conversation not found');
 
     const { body, pinned } = req.body;
@@ -111,20 +123,15 @@ router.post(
     // ids is a Part 8 concern (Socket.IO + email), so we only capture the names.
     const mentions = [...new Set((body.match(/@[\w.-]+/g) ?? []).map((m) => m.slice(1)))];
 
-    const result = await execute(
-      `INSERT INTO notes (workspace_id, conversation_id, user_id, body, mentions, pinned)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [
-        req.workspace.id,
-        req.params.conversationId,
-        req.user.id,
-        body,
-        JSON.stringify(mentions),
-        pinned ? 1 : 0,
-      ],
-    );
-
-    const created = mapNote(await queryOne(SELECT_NOTE, [result.insertId]));
+    const inserted = await insertRow('notes', {
+      workspace_id: req.workspace.id,
+      conversation_id: req.params.conversationId,
+      user_id: req.user.id,
+      body,
+      mentions,
+      pinned,
+    });
+    const created = mapNote(await selectNoteWithAuthor(inserted.id));
 
     // Other agents watching the thread see the note appear without polling.
     emitToConversation(req.workspace.id, req.params.conversationId, EVENTS.NOTE_CREATED, {
@@ -153,21 +160,15 @@ router.patch(
     const note = await ownedNote(req);
     assertCanModify(req, note);
 
-    const fields = [];
-    const params = [];
+    const fields = {};
     if (req.body.body !== undefined) {
-      fields.push('body = ?');
-      params.push(req.body.body);
+      fields.body = req.body.body;
     }
     if (req.body.pinned !== undefined) {
-      fields.push('pinned = ?');
-      params.push(req.body.pinned ? 1 : 0);
+      fields.pinned = req.body.pinned;
     }
-    await execute(`UPDATE notes SET ${fields.join(', ')}, updated_at = NOW() WHERE id = ?`, [
-      ...params,
-      note.id,
-    ]);
-    const updated = mapNote(await queryOne(SELECT_NOTE, [note.id]));
+    const [updatedRow] = await updateRows('notes', fields, { id: note.id });
+    const updated = mapNote(await selectNoteWithAuthor(updatedRow.id));
     emitToConversation(req.workspace.id, note.conversation_id, EVENTS.NOTE_UPDATED, { note: updated });
     res.json({ note: updated });
   }),
@@ -182,7 +183,7 @@ router.delete(
   asyncHandler(async (req, res) => {
     const note = await ownedNote(req);
     assertCanModify(req, note);
-    await execute('DELETE FROM notes WHERE id = ?', [note.id]);
+    await deleteRows('notes', { id: note.id });
     // Announced before the 204, which carries no body.
     emitToConversation(req.workspace.id, note.conversation_id, EVENTS.NOTE_DELETED, {
       noteId: note.id,

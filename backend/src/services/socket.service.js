@@ -17,8 +17,7 @@
  * with the frontend.
  */
 import { Server } from 'socket.io';
-import { queryOne } from '../db/pool.js';
-import { verifyToken } from './token.service.js';
+import { createUserClient, withSupabaseClient, selectOne } from '../db/supabase.js';
 import { findMembership } from './membership.service.js';
 import { env } from '../config/env.js';
 import { childLogger } from '../config/logger.js';
@@ -54,20 +53,26 @@ export function initSocket(httpServer) {
       const { token, workspaceId } = socket.handshake.auth || {};
 
       if (!token) return next(new Error('Missing auth token'));
-      const payload = verifyToken(token, 'access');
-
-      const user = await queryOne(
-        'SELECT id, email, full_name, avatar_url FROM users WHERE id = ? AND status = ?',
-        [payload.sub, 'active'],
+      const client = createUserClient(token);
+      const { data: authData, error: authError } = await client.auth.getUser(token);
+      if (authError || !authData.user) return next(new Error('Invalid or expired auth token'));
+      const user = await withSupabaseClient(client, () =>
+        selectOne('users', 'id,email,full_name,avatar_url,status', {
+          auth_user_id: authData.user.id,
+          status: 'active',
+        }),
       );
       if (!user) return next(new Error('Unknown user'));
 
       socket.data.user = user;
+      socket.data.supabaseClient = client;
 
       // A workspace in the handshake is optional: the client may connect first
       // and switch workspaces later with the `workspace:subscribe` event.
       if (workspaceId) {
-        const membership = await findMembership(user.id, workspaceId);
+        const membership = await withSupabaseClient(client, () =>
+          findMembership(user.id, workspaceId),
+        );
         if (!membership) return next(new Error('Not a member of that workspace'));
         socket.data.workspaceId = Number(workspaceId);
         socket.data.role = membership.role;
@@ -96,7 +101,9 @@ export function initSocket(httpServer) {
     socket.on('workspace:subscribe', async (payload, ack) => {
       const workspaceId = Number(payload?.workspaceId);
       try {
-        const membership = await findMembership(user.id, workspaceId);
+        const membership = await withSupabaseClient(socket.data.supabaseClient, () =>
+          findMembership(user.id, workspaceId),
+        );
         if (!membership) throw new Error('Not a member of that workspace');
 
         // Leave the previous workspace room.
@@ -126,9 +133,8 @@ export function initSocket(httpServer) {
       const workspaceId = socket.data.workspaceId;
       if (!conversationId || !workspaceId) return;
 
-      const conversation = await queryOne(
-        'SELECT id FROM conversations WHERE id = ? AND workspace_id = ?',
-        [conversationId, workspaceId],
+      const conversation = await withSupabaseClient(socket.data.supabaseClient, () =>
+        selectOne('conversations', 'id', { id: conversationId, workspace_id: workspaceId }),
       );
       if (!conversation) {
         log.warn(
@@ -157,9 +163,8 @@ export function initSocket(httpServer) {
       const workspaceId = socket.data.workspaceId;
       if (!conversationId || !workspaceId) return;
 
-      const conversation = await queryOne(
-        'SELECT id FROM conversations WHERE id = ? AND workspace_id = ?',
-        [conversationId, workspaceId],
+      const conversation = await withSupabaseClient(socket.data.supabaseClient, () =>
+        selectOne('conversations', 'id', { id: conversationId, workspace_id: workspaceId }),
       );
       if (!conversation) return;
 

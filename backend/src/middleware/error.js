@@ -74,7 +74,7 @@ export function notFoundHandler(req, res) {
   });
 }
 
-/** Maps MySQL / JWT / zod / multer driver errors onto friendly AppErrors. */
+/** Maps Supabase/PostgREST, Auth, zod, and multer errors onto friendly AppErrors. */
 function normalise(error) {
   if (error?.isOperational) return error;
 
@@ -90,20 +90,19 @@ function normalise(error) {
   }
 
   switch (error?.code) {
-    case 'ER_DUP_ENTRY':
+    case '23505':
       return new AppError('That value is already taken', 409, 'DUPLICATE', {
-        field: error.sqlMessage?.match(/for key '([^']+)'/)?.[1],
+        field: error.constraint,
       });
-    case 'ER_NO_REFERENCED_ROW':
-    case 'ER_NO_REFERENCED_ROW_2':
+    case '23503':
       return new AppError('Related record does not exist', 400, 'INVALID_REFERENCE');
-    case 'ER_ROW_IS_REFERENCED':
-    case 'ER_ROW_IS_REFERENCED_2':
-      return new AppError('This record is in use and cannot be removed', 409, 'RECORD_IN_USE');
-    case 'ER_LOCK_DEADLOCK':
-    case 'ER_LOCK_WAIT_TIMEOUT':
+    case '40P01':
+    case '55P03':
       return new AppError('The database is busy, please retry', 409, 'DB_CONFLICT');
     case 'ECONNREFUSED':
+    case '08000':
+    case '08003':
+    case '08006':
       return new AppError('Database is unavailable', 503, 'DB_UNAVAILABLE');
     case 'ERR_JWT_EXPIRED':
       return new AppError('Session expired, please sign in again', 401, 'TOKEN_EXPIRED');

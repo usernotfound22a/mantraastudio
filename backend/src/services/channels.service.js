@@ -6,7 +6,7 @@
  * everything channel-specific, which is why the schema never needs changing
  * when a new channel is added.
  */
-import { query, queryOne, execute } from '../db/pool.js';
+import { selectRows, selectOne, insertRow, updateRows, deleteRows, callRpc } from '../db/supabase.js';
 import { AppError } from '../middleware/error.js';
 import { childLogger } from '../config/logger.js';
 
@@ -42,18 +42,15 @@ export function toPublicChannel(row) {
 
 /** Internal helper: the full row including secrets (server side only). */
 export const getChannelById = (channelId) =>
-  queryOne('SELECT * FROM channels WHERE id = ? LIMIT 1', [channelId]);
+  selectOne('channels', '*', { id: channelId });
 
 /** All channels of a workspace, newest first. */
-export const listChannelsForWorkspace = (workspaceId) =>
-  query(
-    `SELECT c.*, u.full_name AS connected_by_name
-       FROM channels c
-       LEFT JOIN users u ON u.id = c.connected_by
-      WHERE c.workspace_id = ?
-      ORDER BY c.is_default DESC, c.created_at DESC`,
-    [workspaceId],
-  );
+export async function listChannelsForWorkspace(workspaceId) {
+  const rows = await selectRows('channels', '*,users(full_name)', { workspace_id: workspaceId }, {
+    order: [{ column: 'is_default', ascending: false }, { column: 'created_at', ascending: false }],
+  });
+  return rows.map(({ users, ...row }) => ({ ...row, connected_by_name: users?.full_name ?? null }));
+}
 
 /**
  * Finds a connected channel by its type + remote account id.
@@ -61,14 +58,11 @@ export const listChannelsForWorkspace = (workspaceId) =>
  * page id, we look up which workspace owns it.
  */
 export const findChannelByExternalId = (type, externalId) =>
-  queryOne('SELECT * FROM channels WHERE type = ? AND external_id = ? LIMIT 1', [type, externalId]);
+  selectOne('channels', '*', { type, external_id: externalId });
 
 /** Website widget lookup by its public key. */
 export const findWebsiteChannelByWidgetKey = (widgetKey) =>
-  queryOne(
-    "SELECT * FROM channels WHERE type = 'website' AND JSON_UNQUOTE(JSON_EXTRACT(config, '$.widgetKey')) = ? LIMIT 1",
-    [widgetKey],
-  );
+  callRpc('lookup_widget_channel', { p_widget_key: widgetKey });
 
 /** Creates a channel row. Enforces "one remote account per workspace". */
 export async function createChannel({
@@ -81,15 +75,19 @@ export async function createChannel({
   connectedBy = null,
 }) {
   try {
-    const result = await execute(
-      `INSERT INTO channels (workspace_id, type, name, external_id, is_default, config, connected_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [workspaceId, type, name, externalId, isDefault ? 1 : 0, JSON.stringify(config), connectedBy],
-    );
-    log.info({ workspaceId, type, channelId: result.insertId }, 'Channel created');
-    return getChannelById(result.insertId);
+    const row = await insertRow('channels', {
+      workspace_id: workspaceId,
+      type,
+      name,
+      external_id: externalId,
+       is_default: isDefault ? 1 : 0,
+      config,
+      connected_by: connectedBy,
+    });
+    log.info({ workspaceId, type, channelId: row.id }, 'Channel created');
+    return row;
   } catch (error) {
-    if (error.code === 'ER_DUP_ENTRY') {
+    if (error.code === '23505') {
       throw AppError.conflict(
         `That ${type} account is already connected to a SocialHub workspace`,
       );
@@ -104,24 +102,20 @@ export async function updateChannelConfig(channelId, patch) {
   if (!current) throw AppError.notFound('Channel not found');
 
   const merged = { ...(current.config ?? {}), ...patch };
-  await execute('UPDATE channels SET config = ? WHERE id = ?', [JSON.stringify(merged), channelId]);
+  await updateRows('channels', { config: merged }, { id: channelId });
   return getChannelById(channelId);
 }
 
 /** Replaces the config wholesale (used by the OAuth callback). */
 export const replaceChannelConfig = (channelId, config) =>
-  execute('UPDATE channels SET config = ? WHERE id = ?', [JSON.stringify(config), channelId]);
+  updateRows('channels', { config }, { id: channelId });
 
 export const setChannelStatus = (channelId, status, lastError = null) =>
-  execute('UPDATE channels SET status = ?, last_error = ? WHERE id = ?', [
-    status,
-    lastError,
-    channelId,
-  ]);
+  updateRows('channels', { status, last_error: lastError }, { id: channelId });
 
 /** Deletes a channel and (via FK cascade) its conversations and messages. */
 export const deleteChannel = (channelId) =>
-  execute('DELETE FROM channels WHERE id = ?', [channelId]);
+  deleteRows('channels', { id: channelId });
 
 /** Generates the public widget key for a website channel. */
 export const generateWidgetKey = (workspaceId) =>

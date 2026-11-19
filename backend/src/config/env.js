@@ -16,6 +16,11 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 export const BACKEND_ROOT = path.resolve(here, '..', '..');
 dotenv.config({ path: path.join(BACKEND_ROOT, '.env') });
 
+// Keep the existing browser-side Vite/Next-style names usable for the API,
+// while documenting the unprefixed server-side settings in backend/.env.example.
+process.env.SUPABASE_URL ||= process.env.NEXT_PUBLIC_SUPABASE_URL;
+process.env.SUPABASE_PUBLISHABLE_KEY ||= process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
+
 /** Turns "" into undefined so zod `.optional()` behaves as expected. */
 const emptyToUndefined = (value) => (value === '' ? undefined : value);
 
@@ -30,12 +35,9 @@ const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(4000),
   CORS_ORIGINS: z.string().default('http://localhost:5173').transform(csvToArray),
 
-  DB_HOST: z.string().default('127.0.0.1'),
-  DB_PORT: z.coerce.number().int().positive().default(3306),
-  DB_USER: z.string().default('root'),
-  DB_PASSWORD: z.preprocess(emptyToUndefined, z.string().default('')),
-  DB_NAME: z.string().default('socialhub'),
-  DB_CONNECTION_LIMIT: z.coerce.number().int().positive().default(10),
+  SUPABASE_URL: z.preprocess(emptyToUndefined, z.string().url().optional()),
+  SUPABASE_PUBLISHABLE_KEY: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
+  SUPABASE_SECRET_KEY: z.preprocess(emptyToUndefined, z.string().min(1).optional()),
 
   JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 characters'),
   JWT_ACCESS_TTL: z.string().default('15m'),
@@ -101,6 +103,14 @@ const envSchema = z.object({
   WEBHOOK_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(5),
   // Consecutive failures before an endpoint is disabled automatically.
   WEBHOOK_FAILURE_THRESHOLD: z.coerce.number().int().min(1).max(50).default(10),
+}).superRefine((config, context) => {
+  if (config.NODE_ENV === 'production' && !config.SUPABASE_URL) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['SUPABASE_URL'],
+      message: 'SUPABASE_URL is required in production',
+    });
+  }
 });
 
 const parsed = envSchema.safeParse(process.env);

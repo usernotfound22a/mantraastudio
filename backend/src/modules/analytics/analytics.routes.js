@@ -10,7 +10,7 @@ import { z } from 'zod';
 import { authenticate, loadWorkspace, requireRole } from '../../middleware/auth.js';
 import { validate, queryOf } from '../../middleware/validate.js';
 import { asyncHandler } from '../../middleware/error.js';
-import { query } from '../../db/pool.js';
+import { selectAllRows } from '../../db/supabase.js';
 import {
   RANGES,
   resolveRange,
@@ -143,18 +143,28 @@ router.get(
   validate({ query: rangeQuery }),
   asyncHandler(async (req, res) => {
     const { range, since } = resolveRange(queryOf(req).range);
-    const rows = await query(
-      `SELECT c.id, c.created_at, c.status, c.resolved_at, c.ai_resolved, c.ai_handover,
-              c.ai_handover_reason, c.ai_confidence, c.first_response_seconds,
-              v.channel_type AS channel,
-              c.contact_name AS visitor_name, c.contact_email AS visitor_email,
-              (v.inbound_messages + v.outbound_messages) AS message_count
-         FROM vw_conversation_metrics v
-         JOIN conversations c ON c.id = v.conversation_id
-        WHERE v.workspace_id = ? AND v.created_at >= ?
-        ORDER BY v.created_at DESC`,
-      [req.workspace.id, since],
+    const conversations = await selectAllRows(
+      'conversations',
+      'id,created_at,status,resolved_at,ai_resolved,ai_handover,ai_handover_reason,ai_confidence,first_response_seconds,contact_name,contact_email,channels(type)',
+      { workspace_id: req.workspace.id },
+      { gte: { created_at: since.toISOString() }, order: [{ column: 'created_at', ascending: false }] },
     );
+    const messages = conversations.length
+      ? await selectAllRows('messages', 'conversation_id', { workspace_id: req.workspace.id }, {
+        in: { conversation_id: conversations.map((row) => row.id) },
+      })
+      : [];
+    const counts = new Map();
+    for (const message of messages) {
+      counts.set(message.conversation_id, (counts.get(message.conversation_id) ?? 0) + 1);
+    }
+    const rows = conversations.map((row) => ({
+      ...row,
+      channel: row.channels?.type ?? null,
+      visitor_name: row.contact_name,
+      visitor_email: row.contact_email,
+      message_count: counts.get(row.id) ?? 0,
+    }));
 
     const header = [
       'id',

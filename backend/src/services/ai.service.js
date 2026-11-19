@@ -22,7 +22,7 @@
  */
 import { env } from '../config/env.js';
 import { childLogger } from '../config/logger.js';
-import { execute, query, queryOne } from '../db/pool.js';
+import { selectRows, updateRows, callRpc } from '../db/supabase.js';
 import { searchFaqs, recordFaqMatch, recordFaqMiss, recordUnansweredQuestion } from './faq.service.js';
 import { sendMessageToConversation } from './conversation.service.js';
 import { assertAiQuotaAvailable, incrementUsage } from './subscription.service.js';
@@ -107,18 +107,12 @@ async function generateReply({ question, faqAnswer, workspaceName }) {
 
 async function refreshSummary(conversation, latestIntent) {
   // Only summarise once the thread is long enough to be worth the tokens.
-  const stats = await queryOne(
-    'SELECT COUNT(*) AS total FROM messages WHERE conversation_id = ? AND direction = ?',
-    [conversation.id, 'inbound'],
-  );
-  if (stats.total < 4) return null;
+  const stats = await selectRows('messages', 'id', { conversation_id: conversation.id, direction: 'inbound' });
+  if (stats.length < 4) return null;
 
-  const recent = await query(
-    `SELECT direction, sender_type, body FROM messages
-      WHERE conversation_id = ?
-      ORDER BY id DESC LIMIT 12`,
-    [conversation.id],
-  );
+  const recent = await selectRows('messages', 'direction,sender_type,body', {
+    conversation_id: conversation.id,
+  }, { order: [{ column: 'id', ascending: false }], limit: 12 });
 
   const history = recent
     .reverse()
@@ -149,10 +143,10 @@ async function refreshSummary(conversation, latestIntent) {
   }
   if (!summary) return null;
 
-  await execute(
-    `UPDATE conversations SET ai_summary = ?, ai_lead_tags = ? WHERE id = ?`,
-    [summary, JSON.stringify(latestIntent ? [latestIntent] : []), conversation.id],
-  );
+  await updateRows('conversations', {
+    ai_summary: summary,
+    ai_lead_tags: latestIntent ? [latestIntent] : [],
+  }, { id: conversation.id });
   return summary;
 }
 
@@ -170,17 +164,14 @@ const detectIntentTag = (text) => {
 // ---------------------------------------------------------------------------
 
 async function handOver({ conversation, reason, confidence, faqId = null, intent = null }) {
-  await execute(
-    `UPDATE conversations
-        SET ai_handover = 1,
-            ai_handover_reason = ?,
-            ai_handover_at = NOW(),
-            ai_confidence = ?,
-            ai_last_faq_id = ?,
-            priority = IF(? = 'complaint' OR ? = 'refund', 'high', priority)
-      WHERE id = ?`,
-    [reason, confidence, faqId, intent, intent, conversation.id],
-  );
+  await updateRows('conversations', {
+    ai_handover: 1,
+    ai_handover_reason: reason,
+    ai_handover_at: new Date().toISOString(),
+    ai_confidence: confidence,
+    ai_last_faq_id: faqId,
+    ...(intent === 'complaint' || intent === 'refund' ? { priority: 'high' } : {}),
+  }, { id: conversation.id });
 
   emitToWorkspace(conversation.workspace_id, EVENTS.CONVERSATION_HANDOVER, {
     conversationId: conversation.id,
@@ -237,12 +228,11 @@ export async function maybeAutoReply({ conversation, message, channel, workspace
     });
     const intent = behaviourCtx.intent ?? 'other';
 
-    await execute('UPDATE messages SET intent = ? WHERE id = ?', [intent, message.id]).catch(
-      () => {},
-    );
-    await execute('UPDATE conversations SET ai_message_count = ai_message_count + 1 WHERE id = ?', [
-      conversation.id,
-    ]);
+    await updateRows('messages', { intent }, { id: message.id }).catch(() => {});
+    await callRpc('increment_conversation_ai_messages', {
+      p_conversation_id: conversation.id,
+      p_increment: 1,
+    });
 
     // --- 3. Escalation triggers ----------------------------------------
     const forced = behaviourCtx.escalationReason ?? null;
@@ -343,10 +333,11 @@ export async function maybeAutoReply({ conversation, message, channel, workspace
 
     // The AI answered, so no human time was spent: mark it resolved and refresh
     // the thread memory in the background.
-    await execute(
-      `UPDATE conversations SET ai_resolved = 1, ai_last_faq_id = ?, ai_confidence = ? WHERE id = ?`,
-      [best.faq.id, Number(best.score.toFixed(3)), conversation.id],
-    );
+    await updateRows('conversations', {
+      ai_resolved: 1,
+      ai_last_faq_id: best.faq.id,
+      ai_confidence: Number(best.score.toFixed(3)),
+    }, { id: conversation.id });
     refreshSummary(conversation, intent).catch((error) =>
       log.debug({ err: error.message }, 'Summary refresh failed'),
     );

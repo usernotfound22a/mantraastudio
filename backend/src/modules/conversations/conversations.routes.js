@@ -28,7 +28,7 @@ import {
   setAiHandover,
   mapConversationSummary,
 } from '../../services/conversation.service.js';
-import { query } from '../../db/pool.js';
+import { selectAllRows } from '../../db/supabase.js';
 import messageRoutes from '../messages/messages.routes.js';
 import noteRoutes from '../notes/notes.routes.js';
 
@@ -100,28 +100,19 @@ router.get(
   asyncHandler(async (req, res) => {
     const workspaceId = req.workspace.id;
 
-    const byStatus = await query(
-      `SELECT status, COUNT(*) AS count,
-              SUM(CASE WHEN unread_count > 0 THEN 1 ELSE 0 END) AS unread
-         FROM conversations WHERE workspace_id = ? GROUP BY status`,
-      [workspaceId],
+    const conversations = await selectAllRows(
+      'conversations',
+      'status,unread_count,assignee_id,ai_enabled,ai_handover',
+      { workspace_id: workspaceId },
     );
 
     const totals = { open: 0, pending: 0, closed: 0, unread: 0, mine: 0, aiActive: 0 };
-    for (const row of byStatus) {
-      totals[row.status] = row.count;
-      totals.unread += row.unread;
+    for (const row of conversations) {
+      totals[row.status] += 1;
+      if (row.unread_count > 0) totals.unread += 1;
+      if (row.assignee_id === req.user.id && row.status !== 'closed') totals.mine += 1;
+      if (row.ai_enabled && !row.ai_handover && row.status === 'open') totals.aiActive += 1;
     }
-
-    const [agent] = await query(
-      `SELECT
-         SUM(CASE WHEN assignee_id = ? AND status <> 'closed' THEN 1 ELSE 0 END) AS mine,
-         SUM(CASE WHEN ai_enabled = 1 AND ai_handover = 0 AND status = 'open' THEN 1 ELSE 0 END) AS ai_active
-       FROM conversations WHERE workspace_id = ?`,
-      [req.user.id, workspaceId],
-    );
-    totals.mine = agent.mine ?? 0;
-    totals.aiActive = agent.ai_active ?? 0;
 
     res.json({ stats: totals });
   }),

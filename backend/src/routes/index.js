@@ -6,7 +6,7 @@
  */
 import { Router } from 'express';
 import { asyncHandler } from '../middleware/error.js';
-import { pingDatabase, queryOne } from '../db/pool.js';
+import { pingSupabase } from '../db/supabase.js';
 import authRoutes from '../modules/auth/auth.routes.js';
 import workspaceRoutes from '../modules/workspaces/workspaces.routes.js';
 import channelRoutes from '../modules/channels/channels.routes.js';
@@ -22,7 +22,7 @@ const router = Router();
 
 /**
  * GET /api/health
- * Liveness + readiness in one: 200 only when MySQL answers, so a load
+ * Liveness + readiness in one: 200 only when Supabase answers, so a load
  * balancer / demo grader can tell the difference between "up" and "usable".
  */
 router.get(
@@ -31,19 +31,14 @@ router.get(
     const startedAt = Date.now();
     let database = 'up';
     try {
-      await pingDatabase();
+      await pingSupabase();
     } catch {
       database = 'down';
     }
 
-    const tableCheck = database === 'up'
-      ? await queryOne('SELECT COUNT(*) AS total FROM users').catch(() => null)
-      : null;
-
     res.status(database === 'up' ? 200 : 503).json({
       status: database === 'up' ? 'ok' : 'degraded',
       database,
-      users: tableCheck ? tableCheck.total : null,
       uptimeSeconds: Math.round(process.uptime()),
       latencyMs: Date.now() - startedAt,
       version: process.env.npm_package_version ?? '1.0.0',

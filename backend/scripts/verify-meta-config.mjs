@@ -1,6 +1,5 @@
 import crypto from 'node:crypto';
-import { closePool, execute, query } from '../src/db/pool.js';
-import { env } from '../src/config/env.js';
+import { getAdminClient, selectRows, withSupabaseClient } from '../src/db/supabase.js';
 import { getMetaSettings, saveMetaSettings } from '../src/services/meta-settings.service.js';
 import { isEncrypted } from '../src/services/crypto.service.js';
 
@@ -12,11 +11,9 @@ const check = (label, passed) => {
   console.log(`  ${passed ? 'PASS' : 'FAIL'}  ${label}`);
 };
 
+await withSupabaseClient(getAdminClient(), async () => {
 try {
-  const existing = await query(
-    'SELECT setting_key FROM system_settings WHERE setting_key IN (?, ?)',
-    keys,
-  );
+  const existing = await selectRows('system_settings', 'setting_key', {}, { in: { setting_key: keys } });
   const current = getMetaSettings();
   if (existing.length || current.appId || current.appSecret) {
     console.log('Meta settings already exist; skipped credential overwrite test.');
@@ -25,10 +22,9 @@ try {
     const fakeSecret = crypto.randomBytes(32).toString('hex');
     createdTestSettings = true;
     const saved = await saveMetaSettings({ appId: fakeAppId, appSecret: fakeSecret });
-    const rows = await query(
-      'SELECT setting_key, setting_value FROM system_settings WHERE setting_key IN (?, ?)',
-      keys,
-    );
+    const rows = await selectRows('system_settings', 'setting_key,setting_value', {}, {
+      in: { setting_key: keys },
+    });
     const storedSecret = rows.find((row) => row.setting_key === 'meta_app_secret')?.setting_value;
 
     check('Meta credentials save successfully', saved.configured && saved.appId === fakeAppId);
@@ -41,10 +37,10 @@ try {
   console.error(`  FAIL  Meta settings verification -> ${error.message}`);
 } finally {
   if (createdTestSettings) {
-    await execute('DELETE FROM system_settings WHERE setting_key IN (?, ?)', keys).catch(() => {});
+    await getAdminClient().from('system_settings').delete().in('setting_key', keys);
   }
-  await closePool().catch(() => {});
 }
 
 console.log(`\n${failures === 0 ? 'META SETTINGS CHECK PASSED' : `${failures} META SETTINGS CHECK(S) FAILED`}\n`);
 process.exitCode = failures === 0 ? 0 : 1;
+});

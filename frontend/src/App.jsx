@@ -18,6 +18,7 @@ import AppShell from './components/AppShell.jsx';
 import Inbox from './components/Inbox.jsx';
 import Login from './pages/Login.jsx';
 import Register from './pages/Register.jsx';
+import AuthCallback from './pages/AuthCallback.jsx';
 import Analytics from './pages/Analytics.jsx';
 import Channels from './pages/Channels.jsx';
 import Knowledge from './pages/Knowledge.jsx';
@@ -117,6 +118,7 @@ export default function App() {
 
             <Route path="/login" element={<PublicOnly><Login /></PublicOnly>} />
             <Route path="/register" element={<PublicOnly><Register /></PublicOnly>} />
+            <Route path="/auth/callback" element={<AuthCallback />} />
 
             {/* Preview opens in its own tab, but stays inside the shell so the
                 user can see the snippet without losing their place. */}

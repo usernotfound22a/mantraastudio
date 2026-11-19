@@ -1,18 +1,17 @@
-/**
- * Auth business logic. Routes stay thin; everything that touches the database
- * or hashes a password lives here.
- */
-import bcrypt from 'bcryptjs';
-import { env } from '../../config/env.js';
-import { childLogger } from '../../config/logger.js';
-import { query, queryOne, withTransaction, txQuery, txExecute } from '../../db/pool.js';
+import {
+  createUserClient,
+  getSupabaseClient,
+  withSupabaseClient,
+  callRpc,
+  selectOne,
+  updateRows,
+} from '../../db/supabase.js';
 import { AppError } from '../../middleware/error.js';
-import { issueTokenPair, signAccessToken, verifyToken } from '../../services/token.service.js';
+import { childLogger } from '../../config/logger.js';
 import { listMembershipsForUser } from '../../services/membership.service.js';
 
 const log = childLogger('auth');
 
-/** Never leak the password hash to a client. */
 export const publicUser = (user) => ({
   id: user.id,
   email: user.email,
@@ -22,174 +21,6 @@ export const publicUser = (user) => ({
   createdAt: user.created_at,
 });
 
-/** Turns "My Shop" into "my-shop" (+ "-2" if taken). */
-async function buildSlug(workspaceName, client) {
-  const base =
-    workspaceName
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 60) || 'workspace';
-  const rows = await txQuery(
-    client,
-    'SELECT slug FROM workspaces WHERE slug = ? OR slug LIKE ?',
-    [base, `${base}-%`],
-  );
-  return rows.length === 0 ? base : `${base}-${rows.length + 1}`;
-}
-
-/**
- * POST /api/auth/register
- * Creates the user, their first workspace (as owner) and a free subscription
- * in ONE transaction - so we never end up with a user who owns nothing.
- */
-export async function register({ email, password, fullName, workspaceName }) {
-  const existing = await queryOne('SELECT id FROM users WHERE email = ?', [email]);
-  if (existing) throw AppError.conflict('An account with that email already exists');
-
-  const passwordHash = await bcrypt.hash(password, env.BCRYPT_ROUNDS);
-
-  const { user, workspace } = await withTransaction(async (client) => {
-    const userResult = await txExecute(
-      client,
-      `INSERT INTO users (email, password_hash, full_name)
-       VALUES (?, ?, ?)`,
-      [email, passwordHash, fullName],
-    );
-    const userId = userResult.insertId;
-
-    const slug = await buildSlug(workspaceName, client);
-    const workspaceResult = await txExecute(
-      client,
-      `INSERT INTO workspaces (name, slug, created_by, support_name)
-       VALUES (?, ?, ?, ?)`,
-      [workspaceName, slug, userId, workspaceName],
-    );
-    const workspaceId = workspaceResult.insertId;
-
-    await txExecute(
-      client,
-      `INSERT INTO workspace_members (workspace_id, user_id, role, status, joined_at)
-       VALUES (?, ?, 'owner', 'active', NOW())`,
-      [workspaceId, userId],
-    );
-
-    // Every workspace starts on the free plan; billing upgrades it later.
-    await txExecute(
-      client,
-      `INSERT INTO subscriptions (workspace_id, plan, status, seats, messages_limit, ai_replies_limit)
-       VALUES (?, 'free', 'active', 3, 100, 50)`,
-      [workspaceId],
-    );
-
-    const [createdUser] = await txQuery(client, 'SELECT * FROM users WHERE id = ?', [userId]);
-    return {
-      user: createdUser,
-      workspace: { id: workspaceId, name: workspaceName, slug, role: 'owner' },
-    };
-  });
-
-  log.info({ userId: user.id, workspaceId: workspace.id }, 'New account registered');
-
-  return {
-    user: publicUser(user),
-    workspace,
-    tokens: issueTokenPair(user),
-  };
-}
-
-/**
- * POST /api/auth/login
- * Returns 401 with a deliberately vague message: we must not reveal whether an
- * email exists (that would leak the customer list).
- */
-export async function login({ email, password }) {
-  const user = await queryOne('SELECT * FROM users WHERE email = ? LIMIT 1', [email]);
-
-  if (!user) {
-    // Burn a little CPU so timing does not reveal that the user is missing.
-    await bcrypt.compare(password, '$2a$10$invalidinvalidinvalidinvalidinvalidinvalidinvalidinvaliduO');
-    throw AppError.unauthorized('Incorrect email or password');
-  }
-  if (user.status === 'disabled') throw AppError.forbidden('This account is disabled');
-
-  const passwordMatches = user.password_hash
-    ? await bcrypt.compare(password, user.password_hash)
-    : false;
-  if (!passwordMatches) throw AppError.unauthorized('Incorrect email or password');
-
-  await query('UPDATE users SET last_login_at = NOW() WHERE id = ?', [user.id]);
-
-  const memberships = await listMembershipsForUser(user.id);
-  return {
-    user: publicUser(user),
-    workspaces: memberships.map(mapMembership),
-    tokens: issueTokenPair(user),
-  };
-}
-
-/** POST /api/auth/refresh - exchange a valid refresh token for a new pair. */
-export async function refresh(refreshToken) {
-  const payload = verifyToken(refreshToken, 'refresh');
-
-  const user = await queryOne(
-    `SELECT id, email, full_name, avatar_url, job_title, status, password_hash
-       FROM users WHERE id = ? LIMIT 1`,
-    [payload.sub],
-  );
-  if (!user || user.status !== 'active') throw AppError.unauthorized('Account is not active');
-
-  const memberships = await listMembershipsForUser(user.id);
-  return {
-    user: publicUser(user),
-    workspaces: memberships.map(mapMembership),
-    // Only the access token is rotated; the refresh token stays valid until it
-    // expires. (Add a refresh_tokens table if you need server-side revocation.)
-    accessToken: signAccessToken(user),
-  };
-}
-
-/** GET /api/auth/me - profile + every workspace the caller belongs to. */
-export async function getProfile(userId) {
-  const user = await queryOne(
-    'SELECT * FROM users WHERE id = ? LIMIT 1',
-    [userId],
-  );
-  if (!user) throw AppError.notFound('User not found');
-  return { user: publicUser(user), workspaces: (await listMembershipsForUser(userId)).map(mapMembership) };
-}
-
-/** PATCH /api/auth/me - edit own profile fields. */
-export async function updateProfile(userId, { fullName, avatarUrl, jobTitle, phone }) {
-  await query(
-    `UPDATE users
-        SET full_name  = COALESCE(?, full_name),
-            avatar_url = COALESCE(?, avatar_url),
-            job_title  = COALESCE(?, job_title),
-            phone      = COALESCE(?, phone)
-      WHERE id = ?`,
-    [fullName ?? null, avatarUrl ?? null, jobTitle ?? null, phone ?? null, userId],
-  );
-  return getProfile(userId);
-}
-
-/** POST /api/auth/change-password - requires the current password. */
-export async function changePassword(userId, { currentPassword, newPassword }) {
-  const user = await queryOne('SELECT * FROM users WHERE id = ? LIMIT 1', [userId]);
-  if (!user) throw AppError.notFound('User not found');
-  if (!user.password_hash) {
-    throw AppError.badRequest('This account signs in with an external provider');
-  }
-
-  const matches = await bcrypt.compare(currentPassword, user.password_hash);
-  if (!matches) throw AppError.unauthorized('Current password is incorrect');
-
-  const hash = await bcrypt.hash(newPassword, env.BCRYPT_ROUNDS);
-  await query('UPDATE users SET password_hash = ? WHERE id = ?', [hash, userId]);
-  return { changed: true };
-}
-
-/** DB row -> API shape for a workspace membership. */
 export function mapMembership(row) {
   return {
     id: row.id,
@@ -201,4 +32,165 @@ export function mapMembership(row) {
     aiEnabled: row.ai_enabled === 1 || row.ai_enabled === true,
     joinedAt: row.joined_at,
   };
+}
+
+async function profileForAuthUser(authUser) {
+  let profile = await selectOne('users', '*', { auth_user_id: authUser.id });
+  if (!profile) {
+    const fullName = authUser.user_metadata?.full_name?.trim()
+      || authUser.email?.split('@')[0]
+      || 'SocialHub user';
+    const workspaceName = authUser.user_metadata?.workspace_name?.trim()
+      || `${fullName}'s workspace`;
+    await callRpc('bootstrap_workspace', {
+      p_full_name: fullName,
+      p_workspace_name: workspaceName,
+    });
+    profile = await selectOne('users', '*', { auth_user_id: authUser.id });
+  }
+  if (!profile) throw AppError.unauthorized('Account profile is not ready');
+  if (profile.status === 'disabled') throw AppError.forbidden('This account is disabled');
+  return profile;
+}
+
+function sessionTokens(session) {
+  return {
+    accessToken: session.access_token,
+    refreshToken: session.refresh_token,
+  };
+}
+
+function authError(error, fallback) {
+  if (error?.status === 400 || error?.status === 401) {
+    return AppError.unauthorized(fallback);
+  }
+  if (error?.status === 422) return AppError.conflict(error.message);
+  return error ?? AppError.unauthorized(fallback);
+}
+
+/** Create a Supabase Auth account and atomically bootstrap its first workspace. */
+export async function register({ email, password, fullName, workspaceName }) {
+  const client = createUserClient();
+  const { data, error } = await client.auth.signUp({
+    email,
+    password,
+    options: { data: { full_name: fullName, workspace_name: workspaceName } },
+  });
+  if (error) throw authError(error, 'Could not create an account');
+  if (!data.user) throw AppError.badRequest('Could not create an account');
+  if (!data.session) {
+    return {
+      confirmationRequired: true,
+      email: data.user.email,
+      message: 'Confirm your email, then sign in to finish setting up your workspace.',
+    };
+  }
+
+  const sessionClient = createUserClient(data.session.access_token);
+  const profile = await withSupabaseClient(sessionClient, () =>
+    profileForAuthUser(data.user),
+  );
+  const memberships = await withSupabaseClient(sessionClient, () =>
+    listMembershipsForUser(profile.id),
+  );
+
+  log.info({ userId: profile.id }, 'New account registered');
+  return {
+    user: publicUser(profile),
+    workspaces: memberships.map(mapMembership),
+    tokens: sessionTokens(data.session),
+  };
+}
+
+/** Authenticate with Supabase Auth; the API never handles password hashes. */
+/** Complete a Supabase OAuth (e.g. Google) sign-in using the caller's access token. */
+export async function completeOAuth(accessToken) {
+  const client = createUserClient(accessToken);
+  const { data, error } = await client.auth.getUser(accessToken);
+  if (error || !data?.user) throw AppError.unauthorized('Invalid or expired access token');
+  const scopedClient = createUserClient(accessToken);
+  const profile = await withSupabaseClient(scopedClient, () => profileForAuthUser(data.user));
+  const memberships = await withSupabaseClient(scopedClient, () =>
+    listMembershipsForUser(profile.id),
+  );
+  return {
+    user: publicUser(profile),
+    workspaces: memberships.map(mapMembership),
+    tokens: { accessToken, refreshToken: null },
+  };
+}
+
+export async function login({ email, password }) {
+  const client = createUserClient();
+  const { data, error } = await client.auth.signInWithPassword({ email, password });
+  if (error || !data.session || !data.user) {
+    throw authError(error, 'Incorrect email or password');
+  }
+  const scopedClient = createUserClient(data.session.access_token);
+  const profile = await withSupabaseClient(scopedClient, () => profileForAuthUser(data.user));
+  await withSupabaseClient(scopedClient, () =>
+    updateRows('users', { last_login_at: new Date().toISOString() }, { id: profile.id }),
+  );
+  const memberships = await withSupabaseClient(scopedClient, () =>
+    listMembershipsForUser(profile.id),
+  );
+  return {
+    user: publicUser(profile),
+    workspaces: memberships.map(mapMembership),
+    tokens: sessionTokens(data.session),
+  };
+}
+
+export async function refresh(refreshToken) {
+  const client = createUserClient();
+  const { data, error } = await client.auth.refreshSession({ refresh_token: refreshToken });
+  if (error || !data.session || !data.user) {
+    throw AppError.unauthorized('Session has expired. Please sign in again.');
+  }
+  const scopedClient = createUserClient(data.session.access_token);
+  const profile = await withSupabaseClient(scopedClient, () => profileForAuthUser(data.user));
+  const memberships = await withSupabaseClient(scopedClient, () =>
+    listMembershipsForUser(profile.id),
+  );
+  return {
+    user: publicUser(profile),
+    workspaces: memberships.map(mapMembership),
+    ...sessionTokens(data.session),
+  };
+}
+
+export async function getProfile(userId) {
+  const user = await selectOne('users', '*', { id: userId });
+  if (!user) throw AppError.notFound('User not found');
+  return { user: publicUser(user), workspaces: (await listMembershipsForUser(userId)).map(mapMembership) };
+}
+
+export async function updateProfile(userId, { fullName, avatarUrl, jobTitle, phone }) {
+  const changes = {};
+  if (fullName !== undefined) changes.full_name = fullName;
+  if (avatarUrl !== undefined) changes.avatar_url = avatarUrl;
+  if (jobTitle !== undefined) changes.job_title = jobTitle;
+  if (phone !== undefined) changes.phone = phone;
+  if (Object.keys(changes).length) await updateRows('users', changes, { id: userId });
+  return getProfile(userId);
+}
+
+export async function changePassword(userId, { currentPassword, newPassword }) {
+  const user = await selectOne('users', 'id,email', { id: userId });
+  if (!user) throw AppError.notFound('User not found');
+  const client = getSupabaseClient();
+  const { error: verifyError } = await createUserClient().auth.signInWithPassword({
+    email: user.email,
+    password: currentPassword,
+  });
+  if (verifyError) throw AppError.unauthorized('Current password is incorrect');
+  const { error } = await client.auth.updateUser({ password: newPassword });
+  if (error) throw error;
+  return { changed: true };
+}
+
+export async function logout() {
+  const { error } = await getSupabaseClient().auth.signOut();
+  if (error) throw error;
+  return { success: true };
 }

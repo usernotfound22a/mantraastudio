@@ -5,7 +5,7 @@ import { useApp } from '../context/AppContext.jsx';
 import { Button, Input, Alert } from '../components/ui.jsx';
 
 export default function Login() {
-  const { signIn, user, booting, toast } = useApp();
+  const { signIn, signInWithGoogle, user, booting, toast } = useApp();
   const navigate = useNavigate();
   const location = useLocation();
   const [form, setForm] = useState({ email: '', password: '' });
@@ -97,6 +97,15 @@ export default function Login() {
 
           <Button type="submit" loading={submitting} className="mt-6 w-full">
             Sign in
+          </Button>
+
+          <Button
+            type="button"
+            variant="secondary"
+            className="mt-3 w-full"
+            onClick={() => signInWithGoogle().catch((e) => toast(e.message ?? 'Google sign-in failed', 'error'))}
+          >
+            Continue with Google
           </Button>
 
           <div className="mt-6 rounded-lg bg-slate-50 p-3 text-xs text-slate-600">

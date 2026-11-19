@@ -9,6 +9,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { api, tokens, getActiveWorkspaceId, setActiveWorkspaceId } from '../lib/api.js';
 import { connect, subscribe, disconnect, clearListeners, on, EVENTS } from '../lib/realtime.js';
+import { supabase } from '../lib/supabase.js';
 
 const AppContext = createContext(null);
 
@@ -95,6 +96,38 @@ export function AppProvider({ children }) {
     return data;
   }, []);
 
+  const signInWithGoogle = useCallback(async () => {
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: { redirectTo: `${window.location.origin}/auth/callback` },
+    });
+    if (error) throw error;
+  }, []);
+
+  const completeOAuth = useCallback(async () => {
+    const { data } = await supabase.auth.getSession();
+    const session = data?.session;
+    if (!session?.access_token) throw new Error('No OAuth session');
+    const response = await fetch('/api/auth/oauth', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${session.access_token}` },
+    });
+    if (!response.ok) throw new Error('Could not complete Google sign-in');
+    const result = await response.json();
+    // api.post signature? fallback
+    tokens.save({
+      accessToken: session.access_token,
+      refreshToken: session.refresh_token,
+      user: result.user,
+    });
+    setUser(result.user);
+    setWorkspaces(result.workspaces ?? []);
+    const first = result.workspaces?.[0]?.id ?? null;
+    setActiveWorkspaceId(first);
+    setActive(first);
+    return result;
+  }, []);
+
   const signOut = useCallback(() => {
     clearListeners();
     disconnect();
@@ -162,6 +195,8 @@ export function AppProvider({ children }) {
       live,
       booting,
       signIn,
+      signInWithGoogle,
+      completeOAuth,
       signOut,
       switchWorkspace,
       refreshProfile,
@@ -181,6 +216,8 @@ export function AppProvider({ children }) {
       live,
       booting,
       signIn,
+      signInWithGoogle,
+      completeOAuth,
       signOut,
       switchWorkspace,
       refreshProfile,

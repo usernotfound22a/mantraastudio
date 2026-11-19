@@ -14,7 +14,7 @@ import { z } from 'zod';
 import { authenticate, loadWorkspace, requireRole } from '../../middleware/auth.js';
 import { queryOf, validate } from '../../middleware/validate.js';
 import { asyncHandler, AppError } from '../../middleware/error.js';
-import { execute } from '../../db/pool.js';
+import { updateRows } from '../../db/supabase.js';
 import {
   listChannelsForWorkspace,
   getChannelById,
@@ -161,7 +161,11 @@ router.put(
     }).strict(),
   }),
   asyncHandler(async (req, res) => {
-    res.json(await saveMetaSettings({ ...req.body, updatedBy: req.user.id }));
+    res.json(await saveMetaSettings({
+      ...req.body,
+      updatedBy: req.user.id,
+      workspaceId: req.workspace.id,
+    }));
   }),
 );
 
@@ -763,9 +767,9 @@ router.patch(
 
     if (config) await updateChannelConfig(channel.id, config);
     if (status) await setChannelStatus(channel.id, status, null);
-    if (name !== undefined) await execute('UPDATE channels SET name = ? WHERE id = ?', [name, channel.id]);
+    if (name !== undefined) await updateRows('channels', { name }, { id: channel.id });
     if (isDefault !== undefined) {
-      await execute('UPDATE channels SET is_default = ? WHERE id = ?', [isDefault ? 1 : 0, channel.id]);
+      await updateRows('channels', { is_default: isDefault }, { id: channel.id });
     }
 
     // Other tabs show the settings screen, so tell them the channel changed.

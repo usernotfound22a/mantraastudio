@@ -5,16 +5,16 @@ AI-Assisted Omnichannel Inbox: manage Facebook Messenger, Instagram and a custom
 ## 1) Prerequisites
 
 - Node.js 20+ (this project uses ES modules)
-- MySQL 8.x or MariaDB 10.6+ running locally (or a remote instance)
+- A Supabase project (PostgreSQL database + Supabase Auth)
 - npm 10+
 
-MySQL on Windows: install [MySQL Community Server](https://dev.mysql.com/downloads/mysql/). MariaDB works too - the schema avoids MySQL-8-only syntax. If you have neither, `npm run check` will tell you exactly what's missing.
+The backend uses Supabase Auth and `@supabase/supabase-js`; it does not connect through a PostgreSQL driver. Browser requests use the caller's Auth token and database RLS. Keep `SUPABASE_SECRET_KEY` server-only.
 
 ## 2) Folder structure
 
 ```text
 socialhub/
-  backend/        Express + Socket.IO + MariaDB/MySQL API
+  backend/        Express + Socket.IO + Supabase API
   frontend/       React + Vite + Tailwind dashboard
     widget/       Embeddable website chat (served by the API at /widget/*)
   docs/           Diagrams, report notes
@@ -33,27 +33,27 @@ customer embeds a single stable URL.
    cp .env.example .env        # Windows cmd:  copy .env.example .env
    ```
 
-2. Fill the required values in `backend/.env` (at minimum):
+2. Fill the required values in `backend/.env`:
 
-   - `JWT_SECRET` - generate: `node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"`
-   - `DB_USER`, `DB_PASSWORD`, `DB_NAME` (default `socialhub`)
+   - `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` (the backend also accepts the existing `NEXT_PUBLIC_SUPABASE_*` names)
+   - `SUPABASE_SECRET_KEY` - server-only key for trusted webhooks/workers; never expose it to the frontend
+   - `JWT_SECRET` - used for OAuth state and encryption fallback; generate a random value of at least 32 characters
    - `CORS_ORIGINS` - `http://localhost:5173` for the frontend
 
-   Leave the Meta/Stripe/OpenAI values blank for now (demo works in offline AI mode).
+   Leave optional Meta/Stripe/OpenAI values blank for now (AI can run in offline mode).
 
-3. Create the database and tables
+3. Validate and apply the checked-in Supabase migration locally
 
    ```bash
+   npx supabase start
    npm run db:migrate
    ```
 
-4. Seed demo data (logs in with `demo@socialhub.test / Demo1234!`)
+   To apply to the fresh hosted project, authenticate and link the Supabase CLI, then run `npx supabase migration up --remote`. Review the migration before applying it.
 
-   ```bash
-   npm run db:seed
-   ```
+4. Register through the app. Supabase Auth creates the identity; the workspace bootstrap RPC creates the application profile, workspace, membership, and subscription.
 
-5. Verify everything
+5. Verify configuration and connectivity
 
    ```bash
    npm run check
@@ -75,24 +75,23 @@ API health: [http://localhost:4000/api/health](http://localhost:4000/api/health)
 |---|---|
 | `npm run dev` | Start with auto-reload (development) |
 | `npm start` | Start in production mode |
-| `npm run db:migrate` | Create DB if missing + apply schema.sql |
-| `npm run db:migrate -- --fresh` | DROP all tables, re-apply schema (destroys data) |
-| `npm run db:seed` | Insert demo workspace/users/faqs/channel |
-| `npm run db:reset` | Fresh + seed in one go |
-| `npm run check` | Environment + DB + tables health check |
+| `npm run db:check-schema` | Validate the checked-in schema, migration, and RLS coverage |
+| `npm run db:migrate` | Validate and apply migrations to the local Supabase stack |
+| `npm run db:reset` | Reset the local Supabase database and reapply migrations |
+| `npm run check` | Environment + Supabase connectivity + required table health check |
 | `npm run routes` | Route/guard/event audit against the live router stack |
 | `npm run verify:analytics` | Run every analytics query against the real database |
 | `npm run verify:plugins` | Contract tests for the channel + AI plugin systems |
-| `npm run verify:api` | End-to-end public API + outbound webhook test (needs the API running) |
-| `npm run verify:channels` | Inbound/outbound adapter round trip against the real database |
+| `npm run verify:api` | End-to-end public API + outbound webhook test (needs the API, a registered test user, and `DEMO_EMAIL`/`DEMO_PASSWORD`) |
+| `npm run verify:channels` | Inbound adapter round trip against the configured Supabase project |
 
 ## 5) Architecture decisions (important)
 
 - **Adapter Pattern**: every channel (`website`, `messenger`, `instagram`) will be implemented as its own adapter extending `BaseAdapter`. Webhooks call the adapter factory — they must not contain channel-specific logic. (Part 5)
 - **Multi-tenancy**: every tenant-scoped query filters by `workspace_id` via `loadWorkspace` middleware. The `X-Workspace-Id` header is required for workspace routes.
-- **Stateless auth**: JWT access + refresh tokens. Refresh tokens are never stored in the DB here (simple + demo-friendly). Add a token revocation table later if you need it.
+- **Supabase Auth**: Auth owns signup, login, refresh, and access-token validation; the backend maps Auth UUIDs to application profiles.
 - **ES modules**: The backend uses `"type": "module"` to match modern Node (and Vite). Use relative imports with `.js` (Node's ESM requires it).
-- **Transaction-first writes**: operations that create a user + workspace + subscription run in `withTransaction()` to keep data consistent.
+- **RLS-first data access**: dashboard requests forward the caller's Auth token. Narrow, purpose-specific RPCs handle atomic bootstrap, joins, widget access, and counters; there is no arbitrary SQL RPC.
 - **Validation**: zod at the route boundary (`validate()` middleware). Handlers receive typed, normalised bodies/params/queries.
 - **Errors**: `AppError` + a single `errorHandler`. No `res.status(...).json(...)` for failures outside 404.
 
@@ -103,9 +102,9 @@ Implemented (foundation + adapter system):
 - [x] Folder structure
 - [x] `package.json` + scripts
 - [x] `.env.example`, `env.js`, `logger.js`
-- [x] `pool.js` (MySQL pool + transaction helpers)
-- [x] `schema.sql` (10 tables + FK constraints + metrics view)
-- [x] `migrate.js`, `seed.js`, `check-env.js`, `routes.js` (route map **+ guard audit**)
+- [x] `supabase.js` (user-scoped Supabase SDK client + trusted server client)
+- [x] `schema.sql` and checked-in Supabase migration (PostgreSQL schema + RLS)
+- [x] `migrate.js` schema validator, `check-env.js`, `routes.js` (route map **+ guard audit**)
 - [x] Error middleware + validation
 - [x] Auth tokens + membership service
 - [x] Auth middleware (`authenticate`, `loadWorkspace`, `requireRole`)
@@ -173,8 +172,8 @@ export class TelegramAdapter extends BaseAdapter {
 export default TelegramAdapter;
 ```
 
-2. `npm run db:migrate` (add `'telegram'` to the `channels.type` ENUM - the only
-   schema change, and only because MySQL ENUMs are rigid).
+2. `npm run db:migrate` (the channel type is a string, so no schema change is
+   needed for a new adapter).
 3. Restart. `registry.js` imports the file automatically.
 
 **Nothing else changes.** No factory edit, no `index.js` edit, no switch
@@ -200,10 +199,8 @@ The website channel needs no external account:
 # 1. Start the API
 npm run dev
 
-# 2. Grab the seeded workspace + widget key
-curl "http://localhost:4000/api/health"
-#    widget key is in the `channels.config` of the seeded website channel:
-#    wk_demo_1_replace_me   (see scripts/seed.js)
+# 2. Register and log in, then create a Website channel from the dashboard.
+#    Copy its widget key from the channel settings.
 
 # 3. Bootstrap the widget
 curl "http://localhost:4000/api/widget/config?key=wk_demo_1_replace_me"
@@ -475,17 +472,18 @@ hole wearing a nicer hat.
 ### 16.1 Channel adapters
 
 `src/plugins/contract.js` defines the manifest + adapter shape;
-`src/plugins/channel.loader.js` discovers and registers them from two places:
+`backend/src/plugins/channel.loader.js` registers bundled adapters through
+static imports so serverless deployments include their full module graphs.
+These include `backend/src/adapters/*.js` and the Telegram example at
+`backend/plugins/telegram/`. Additional plugins can be placed in
+`backend/plugins/<folder>/`; the loader discovers an `index.js` (or
+`plugin.js`) entrypoint and uses `manifest.json` when present. Override the
+plugin directory with `CHANNEL_PLUGINS_DIR`. Serverless deployments must bundle
+any additional plugin files they discover at runtime.
 
-1. `src/adapters/channels/*.js` - the built-ins (messenger, instagram, whatsapp,
-   website).
-2. `backend/plugins/<folder>/` - third-party plugins. Each folder needs a
-   `manifest.json` and an `index.js`. Override the location with
-   `CHANNEL_PLUGINS_DIR`.
-
-`backend/plugins/telegram/` is a complete working example. `manifest.json`
-declares `id`, `version`, `label`, `description`, `capabilities` and a
-`configSchema`; the dashboard renders that schema, so adding a channel needs no
+The Telegram example's `manifest.json` describes its label, capabilities and
+`configSchema`; bundled adapter metadata is synthesized from the class, and
+the dashboard renders the same schema shape, so adding a channel needs no
 frontend change.
 
 ```jsonc
@@ -658,4 +656,3 @@ Honest list of what is deliberately not done:
 - The Meta connect token store is in-process and in-memory, so it does not
   survive a restart and will not work behind more than one API instance. Move it
   to the database (or a shared cache) before scaling out.
-

@@ -4,7 +4,7 @@
  * Mounted at /api/auth
  */
 import { Router } from 'express';
-import { asyncHandler } from '../../middleware/error.js';
+import { asyncHandler, AppError } from '../../middleware/error.js';
 import { authenticate } from '../../middleware/auth.js';
 import { authLimiter } from '../../middleware/rateLimit.js';
 import { validate } from '../../middleware/validate.js';
@@ -27,6 +27,18 @@ router.post(
   asyncHandler(async (req, res) => {
     const result = await authService.register(req.body);
     res.status(201).json(result);
+  }),
+);
+
+/** POST /api/auth/oauth -> complete a Supabase OAuth sign-in with a bearer token */
+router.post(
+  '/oauth',
+  authLimiter,
+  asyncHandler(async (req, res) => {
+    const header = req.headers.authorization || '';
+    const token = header.startsWith('Bearer ') ? header.slice(7).trim() : null;
+    if (!token) throw AppError.unauthorized('Missing access token');
+    res.json(await authService.completeOAuth(token));
   }),
 );
 
@@ -88,10 +100,11 @@ router.post(
 router.post(
   '/logout',
   authenticate,
-  (req, res) => {
+  asyncHandler(async (req, res) => {
+    await authService.logout();
     req.log.info({ userId: req.user.id }, 'User logged out');
     res.json({ success: true });
-  },
+  }),
 );
 
 export default router;

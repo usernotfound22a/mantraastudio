@@ -4,7 +4,7 @@
  * Three jobs in one:
  *   1. Useful during development ("which endpoint did I forget?")
  *   2. A smoke test: if any route module has a syntax error or a bad import,
- *      this script fails immediately without needing MySQL.
+ *      this script fails immediately without a live database connection.
  *   3. A guard audit: proves every tenant route is authenticated, workspace
  *      scoped, validated and role-gated. This is the check that would have
  *      caught an un-authenticated route before it shipped.
@@ -126,6 +126,7 @@ const NO_AUTH_OK = [
   // Facebook redirects the browser here; a top-level navigation sends no
   // Authorization header, so the signed state token is the CSRF defence.
   '/api/channels/meta/oauth/callback',
+  '/api/channels/meta/instagram/oauth/callback',
 ];
 /** User-scoped or tenant-is-the-target, so no workspace context is loaded. */
 const NO_WORKSPACE_OK = [
@@ -133,6 +134,7 @@ const NO_WORKSPACE_OK = [
   '/api/workspaces',
   '/api/channels/catalogue',
   '/api/channels/meta/oauth/callback',
+  '/api/channels/meta/instagram/oauth/callback',
 ];
 /** Writes whose input is not a JSON body. */
 const NO_SCHEMA_OK = ['/api/auth/logout', '/api/uploads/attachment'];

@@ -24,7 +24,7 @@ import { z } from 'zod';
 import { asyncHandler } from '../../middleware/error.js';
 import { queryOf, validate } from '../../middleware/validate.js';
 import { authenticateApiKeyMiddleware, requireApiScope } from '../../middleware/apiAuth.js';
-import { query, queryOne } from '../../db/pool.js';
+import { selectOne, selectRows, updateRows } from '../../db/supabase.js';
 import { mapMessage } from '../../services/conversation.service.js';
 import { createAdapterForChannel } from '../../adapters/factory.js';
 
@@ -60,30 +60,20 @@ router.get(
   asyncHandler(async (req, res) => {
     const { status, limit, cursor } = req.validatedQuery ?? req.query;
 
-    const params = [req.workspaceId];
-    let where = 'c.workspace_id = ?';
-    if (status !== 'all') {
-      where += ' AND c.status = ?';
-      params.push(status);
-    }
-    // Keyset pagination: stable and cheap, unlike OFFSET on a growing table.
-    if (cursor) {
-      where += ' AND c.id < ?';
-      params.push(cursor);
-    }
+    const filters = { workspace_id: req.workspaceId };
+    if (status !== 'all') filters.status = status;
+    const rows = await selectRows('conversations', '*', filters, {
+      ...(cursor ? { lt: { id: cursor } } : {}),
+      order: [{ column: 'id', ascending: false }],
+      limit: Number(limit) + 1,
+    });
+    const hydrated = await Promise.all(rows.map(async (row) => {
+      const channel = await selectOne('channels', 'type,name', { id: row.channel_id });
+      return { ...row, channel_type: channel?.type, channel_name: channel?.name };
+    }));
 
-    const rows = await query(
-      `SELECT c.*, ch.type AS channel_type, ch.name AS channel_name
-         FROM conversations c
-         JOIN channels ch ON ch.id = c.channel_id
-        WHERE ${where}
-        ORDER BY c.id DESC
-        LIMIT ${Number(limit) + 1}`,
-      params,
-    );
-
-    const hasMore = rows.length > limit;
-    const page = hasMore ? rows.slice(0, limit) : rows;
+    const hasMore = hydrated.length > limit;
+    const page = hasMore ? hydrated.slice(0, limit) : hydrated;
 
     res.json({
       conversations: page.map(mapConversation),
@@ -97,13 +87,9 @@ router.get(
   requireApiScope('conversations:read'),
   validate({ params: z.object({ id: z.coerce.number().int().positive() }) }),
   asyncHandler(async (req, res) => {
-    const conversation = await queryOne(
-      `SELECT c.*, ch.type AS channel_type, ch.name AS channel_name
-         FROM conversations c
-         JOIN channels ch ON ch.id = c.channel_id
-        WHERE c.id = ? AND c.workspace_id = ?`,
-      [req.params.id, req.workspaceId],
-    );
+    const row = await selectOne('conversations', '*', { id: req.params.id, workspace_id: req.workspaceId });
+    const channel = row && await selectOne('channels', 'type,name', { id: row.channel_id });
+    const conversation = row && { ...row, channel_type: channel?.type, channel_name: channel?.name };
     if (!conversation) {
       res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Conversation not found' } });
       return;
@@ -126,49 +112,49 @@ router.patch(
     const { status, assigneeId } = req.body;
 
     // Confirm the conversation belongs to this key's workspace before writing.
-    const conversation = await queryOne(
-      'SELECT id FROM conversations WHERE id = ? AND workspace_id = ?',
-      [req.params.id, req.workspaceId],
-    );
+    const conversation = await selectOne('conversations', 'id', {
+      id: req.params.id, workspace_id: req.workspaceId,
+    });
     if (!conversation) {
       res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Conversation not found' } });
       return;
     }
 
     if (status) {
-      await query('UPDATE conversations SET status = ?, resolved_at = ? WHERE id = ?', [
+      await updateRows('conversations', {
         status,
-        status === 'resolved' ? new Date() : null,
-        req.params.id,
-      ]);
+        resolved_at: status === 'resolved' ? new Date().toISOString() : null,
+      }, { id: req.params.id, workspace_id: req.workspaceId });
     }
     if (assigneeId !== undefined) {
       if (assigneeId === null) {
-        await query('UPDATE conversations SET assignee_id = NULL WHERE id = ?', [req.params.id]);
+        await updateRows('conversations', { assignee_id: null }, {
+          id: req.params.id, workspace_id: req.workspaceId,
+        });
       } else {
         // The assignee must be a member of THIS workspace, not any user id.
-        const member = await queryOne(
-          'SELECT 1 AS ok FROM workspace_members WHERE workspace_id = ? AND user_id = ?',
-          [req.workspaceId, assigneeId],
-        );
+        const member = await selectOne('workspace_members', 'user_id', {
+          workspace_id: req.workspaceId, user_id: assigneeId,
+        });
         if (!member) {
           res.status(400).json({
             error: { code: 'BAD_REQUEST', message: 'assigneeId is not a member of this workspace' },
           });
           return;
         }
-        await query('UPDATE conversations SET assignee_id = ? WHERE id = ?', [assigneeId, req.params.id]);
+        await updateRows('conversations', { assignee_id: assigneeId }, {
+          id: req.params.id, workspace_id: req.workspaceId,
+        });
       }
     }
 
-    const fresh = await queryOne(
-      `SELECT c.*, ch.type AS channel_type, ch.name AS channel_name
-         FROM conversations c
-         JOIN channels ch ON ch.id = c.channel_id
-        WHERE c.id = ?`,
-      [req.params.id],
-    );
-    res.json({ conversation: mapConversation(fresh) });
+    const fresh = await selectOne('conversations', '*', {
+      id: req.params.id, workspace_id: req.workspaceId,
+    });
+    const freshChannel = fresh && await selectOne('channels', 'type,name', { id: fresh.channel_id });
+    res.json({ conversation: mapConversation({
+      ...fresh, channel_type: freshChannel?.type, channel_name: freshChannel?.name,
+    }) });
   }),
 );
 
@@ -182,18 +168,29 @@ router.get(
     query: z.object({ limit: z.coerce.number().int().positive().max(100).default(50) }),
   }),
   asyncHandler(async (req, res) => {
-    const rows = await query(
-      `SELECT m.*, u.full_name AS sender_display_name, u.avatar_url AS sender_display_avatar
-         FROM messages m
-         LEFT JOIN users u ON u.id = m.sender_id
-         JOIN conversations c ON c.id = m.conversation_id
-        WHERE m.conversation_id = ? AND c.workspace_id = ?
-        ORDER BY m.id DESC
-        LIMIT ${Number(queryOf(req).limit)}`,
-      [req.params.id, req.workspaceId],
-    );
+    const conversation = await selectOne('conversations', 'id', {
+      id: req.params.id, workspace_id: req.workspaceId,
+    });
+    if (!conversation) {
+      res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Conversation not found' } });
+      return;
+    }
+    const rows = await selectRows('messages', '*', { conversation_id: req.params.id }, {
+      order: [{ column: 'id', ascending: false }],
+      limit: Number(queryOf(req).limit),
+    });
+    const hydrated = await Promise.all(rows.map(async (message) => {
+      const sender = message.sender_id
+        ? await selectOne('users', 'full_name,avatar_url', { id: message.sender_id })
+        : null;
+      return {
+        ...message,
+        sender_display_name: sender?.full_name,
+        sender_display_avatar: sender?.avatar_url,
+      };
+    }));
     // Returned oldest-first, which is how a chat transcript reads.
-    res.json({ messages: rows.reverse().map(mapMessage) });
+    res.json({ messages: hydrated.reverse().map(mapMessage) });
   }),
 );
 
@@ -211,34 +208,31 @@ router.post(
   asyncHandler(async (req, res) => {
     const { body, senderName } = req.body;
 
-    const conversation = await queryOne(
-      // The channel row is needed in full, not just id/type/status: adapters read
-      // their credentials out of `config`, so a partial row makes real delivery
-      // (Messenger/Instagram) fail with a missing access token.
-      `SELECT c.*, ch.id AS ch_id, ch.type AS ch_type, ch.status AS ch_status, ch.name AS ch_name,
-              ch.external_id AS ch_external_id, ch.config AS ch_config, ch.workspace_id AS ch_workspace_id
-         FROM conversations c
-         JOIN channels ch ON ch.id = c.channel_id
-        WHERE c.id = ? AND c.workspace_id = ?`,
-      [req.params.id, req.workspaceId],
-    );
+    const conversation = await selectOne('conversations', '*', {
+      id: req.params.id, workspace_id: req.workspaceId,
+    });
     if (!conversation) {
       res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Conversation not found' } });
       return;
     }
 
     // Same shape channels.service.js hands to the factory.
-    const rawConfig = typeof conversation.ch_config === 'string'
-      ? JSON.parse(conversation.ch_config)
-      : (conversation.ch_config ?? {});
+    const channelRow = await selectOne('channels', '*', {
+      id: conversation.channel_id, workspace_id: req.workspaceId,
+    });
+    if (!channelRow) {
+      res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Channel not found' } });
+      return;
+    }
+    const rawConfig = typeof channelRow.config === 'string' ? JSON.parse(channelRow.config) : (channelRow.config ?? {});
     const channel = {
-      id: conversation.ch_id,
-      type: conversation.ch_type,
-      status: conversation.ch_status,
-      name: conversation.ch_name,
-      external_id: conversation.ch_external_id,
+      id: channelRow.id,
+      type: channelRow.type,
+      status: channelRow.status,
+      name: channelRow.name,
+      external_id: channelRow.external_id,
       config: rawConfig,
-      workspace_id: conversation.ch_workspace_id ?? req.workspaceId,
+      workspace_id: channelRow.workspace_id ?? req.workspaceId,
     };
 
     // Reuse the single delivery path, so an API-triggered message is delivered
@@ -269,15 +263,20 @@ router.get(
   '/analytics/summary',
   requireApiScope('analytics:read'),
   asyncHandler(async (req, res) => {
-    const [totals] = await query(
-      `SELECT
-         COUNT(*) AS total,
-         SUM(status = 'open')    AS open,
-         SUM(status = 'resolved') AS resolved,
-         AVG(first_response_seconds) AS avg_first_response
-       FROM conversations WHERE workspace_id = ?`,
-      [req.workspaceId],
-    );
+    const rows = await selectRows('conversations', 'status,first_response_seconds', {
+      workspace_id: req.workspaceId,
+    });
+    const totals = rows.reduce((acc, row) => {
+      acc.total += 1;
+      if (row.status === 'open') acc.open += 1;
+      if (row.status === 'resolved') acc.resolved += 1;
+      if (row.first_response_seconds != null) {
+        acc.responseSum += Number(row.first_response_seconds);
+        acc.responseCount += 1;
+      }
+      return acc;
+    }, { total: 0, open: 0, resolved: 0, responseSum: 0, responseCount: 0 });
+    totals.avg_first_response = totals.responseCount ? totals.responseSum / totals.responseCount : null;
     res.json({
       analytics: {
         conversations: {
@@ -299,10 +298,9 @@ router.get(
   '/faqs',
   requireApiScope('faqs:read'),
   asyncHandler(async (req, res) => {
-    const rows = await query(
-      'SELECT id, question, answer, category, keywords, is_active FROM faqs WHERE workspace_id = ? ORDER BY id LIMIT 200',
-      [req.workspaceId],
-    );
+    const rows = await selectRows('faqs', 'id,question,answer,category,keywords,is_active', {
+      workspace_id: req.workspaceId,
+    }, { order: [{ column: 'id', ascending: true }], limit: 200 });
     res.json({ faqs: rows });
   }),
 );
@@ -313,10 +311,9 @@ router.get(
   '/channels',
   requireApiScope('conversations:read'),
   asyncHandler(async (req, res) => {
-    const rows = await query(
-      'SELECT id, type, name, status, created_at FROM channels WHERE workspace_id = ? ORDER BY id',
-      [req.workspaceId],
-    );
+    const rows = await selectRows('channels', 'id,type,name,status,created_at', {
+      workspace_id: req.workspaceId,
+    }, { order: [{ column: 'id', ascending: true }] });
     res.json({ channels: rows });
   }),
 );

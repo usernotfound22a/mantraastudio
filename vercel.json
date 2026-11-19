@@ -3,11 +3,23 @@
   "services": {
     "backend": {
       "root": "backend",
-      "framework": "express"
+      "framework": "express",
+      "entrypoint": "api/index.js",
+      "functions": {
+        "api/index.js": {
+          "includeFiles": "{src/adapters/**/*.js,plugins/**/*,backend/src/adapters/**/*.js,backend/plugins/**/*}"
+        }
+      }
     },
     "frontend": {
       "root": "frontend",
-      "framework": "vite"
+      "framework": "vite",
+      "rewrites": [
+        {
+          "source": "/(.*)",
+          "destination": "/index.html"
+        }
+      ]
     }
   },
   "rewrites": [

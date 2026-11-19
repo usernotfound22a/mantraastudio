@@ -4,7 +4,7 @@ import { authenticate, loadWorkspace, requireRole } from '../../middleware/auth.
 import { validate } from '../../middleware/validate.js';
 import { asyncHandler, AppError } from '../../middleware/error.js';
 import { findMembership } from '../../services/membership.service.js';
-import { queryOne, execute } from '../../db/pool.js';
+import { selectOne, updateRows } from '../../db/supabase.js';
 
 const router = Router({ mergeParams: true });
 
@@ -21,6 +21,7 @@ import { randomUUID } from 'crypto';
 import path from 'path';
 import fs from 'fs';
 import { tmpdir } from 'os';
+import { fileURLToPath } from 'node:url';
 
 export const UPLOAD_DIR = process.env.VERCEL
   ? path.join(tmpdir(), 'socialhub-uploads')
@@ -96,22 +97,17 @@ router.patch(
     const membership = await findMembership(req.user.id, workspaceId);
     if (!membership || membership.status !== 'active') throw AppError.forbidden('Workspace membership required');
 
-    const conv = await queryOne('SELECT id FROM conversations WHERE id = ? AND workspace_id = ?', [
-      req.params.id,
-      workspaceId,
-    ]);
+    const conv = await selectOne('conversations', 'id', { id: req.params.id, workspace_id: workspaceId });
     if (!conv) throw AppError.notFound('Conversation not found');
 
     const { aiSummary, aiLeadTags, aiIntent, aiResolved } = req.body;
-    const fields = [];
-    const params = [];
-    if (aiSummary !== undefined) { fields.push('ai_summary = ?'); params.push(aiSummary); }
-    if (aiLeadTags !== undefined) { fields.push('ai_lead_tags = ?'); params.push(JSON.stringify(aiLeadTags)); }
-    if (aiIntent !== undefined) { fields.push('intent = ?'); params.push(aiIntent); }
-    if (aiResolved !== undefined) { fields.push('ai_resolved = ?'); params.push(aiResolved ? 1 : 0); }
-    if (fields.length === 0) throw AppError.badRequest('No fields provided');
-
-    await execute(`UPDATE conversations SET ${fields.join(', ')} WHERE id = ?`, [...params, conv.id]);
+    const changes = {};
+    if (aiSummary !== undefined) changes.ai_summary = aiSummary;
+    if (aiLeadTags !== undefined) changes.ai_lead_tags = aiLeadTags;
+    if (aiIntent !== undefined) changes.intent = aiIntent;
+    if (aiResolved !== undefined) changes.ai_resolved = aiResolved ? 1 : 0;
+    if (!Object.keys(changes).length) throw AppError.badRequest('No fields provided');
+    await updateRows('conversations', changes, { id: conv.id });
     res.sendStatus(204);
   }),
 );

@@ -38,7 +38,7 @@ const manifests = listPluginManifests();
 const types = manifests.map((m) => m.type);
 
 check('built-in adapters discovered', ['website', 'messenger', 'instagram', 'whatsapp'].every((t) => types.includes(t)), types.join(', '));
-check('third-party telegram plugin discovered', types.includes('telegram'));
+check('bundled Telegram plugin registered', types.includes('telegram'));
 
 const WhatsAppAdapter = getAdapterClass('whatsapp');
 const whatsappAdapter = new WhatsAppAdapter();
@@ -72,7 +72,7 @@ check(
 );
 
 const telegram = getPluginManifest('telegram');
-check('telegram manifest parsed from manifest.json', telegram?.version === '1.0.0', `v${telegram?.version}`);
+check('telegram manifest metadata available', telegram?.version === '1.0.0', `v${telegram?.version}`);
 check('telegram manifest type matches adapter', telegram?.type === 'telegram');
 check('telegram configSchema surfaced', Array.isArray(telegram?.configSchema) && telegram.configSchema.length === 2);
 

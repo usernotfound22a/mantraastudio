@@ -17,7 +17,7 @@
  *     a message even if it guesses the URL.
  */
 import crypto from 'node:crypto';
-import { execute, query, queryOne } from '../db/pool.js';
+import { insertRow, selectRows, selectOne, updateRows, callRpc } from '../db/supabase.js';
 import { AppError } from '../middleware/error.js';
 
 /**
@@ -50,7 +50,7 @@ export function assertValidScopes(scopes) {
 }
 
 /** SHA-256 hex digest - the lookup key for a presented API key. */
-const hashKey = (raw) => crypto.createHash('sha256').update(raw).digest('hex');
+export const hashApiKey = (raw) => crypto.createHash('sha256').update(raw).digest('hex');
 
 /** The public, non-secret part of a key, e.g. "sh_live_a1b2c3". */
 const keyPrefix = (raw) => raw.slice(0, 15);
@@ -68,50 +68,41 @@ export async function createApiKey({ workspaceId, name, scopes, createdBy = null
   // in logs and error messages without being guessable.
   const secret = `sh_live_${crypto.randomBytes(24).toString('base64url')}`;
 
-  // INSERT goes through execute() (which returns { insertId }); queryOne() is
-  // for SELECTs and would return null here.
-  const result = await execute(
-    // MariaDB has no CAST(... AS JSON) (that is MySQL-only). Passing the
-    // JSON text directly to a JSON column works on both and is what the rest
-    // of this codebase already does for keywords/tags/metadata.
-    `INSERT INTO api_keys (workspace_id, name, key_prefix, key_hash, scopes, created_by, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    [
-      workspaceId,
-      name,
-      keyPrefix(secret),
-      hashKey(secret),
-      JSON.stringify(granted),
-      createdBy,
-      expiresAt,
-    ],
-  );
+  const row = await insertRow('api_keys', {
+    workspace_id: workspaceId,
+    name,
+    key_prefix: keyPrefix(secret),
+    key_hash: hashKey(secret),
+    scopes: granted,
+    created_by: createdBy,
+    expires_at: expiresAt,
+  });
 
-  return { key: await getApiKeyById(workspaceId, result.insertId), secret };
+  return { key: mapApiKey(row), secret };
 }
 
 /** Lists a workspace's keys. Never returns the secret. */
 export async function listApiKeys(workspaceId) {
-  const rows = await query(
-    `SELECT * FROM api_keys WHERE workspace_id = ? ORDER BY created_at DESC`,
-    [workspaceId],
-  );
+  const rows = await selectRows('api_keys', '*', { workspace_id: workspaceId }, {
+    order: [{ column: 'created_at', ascending: false }],
+  });
   return rows.map(mapApiKey);
 }
 
 export async function getApiKeyById(workspaceId, id) {
-  const row = await queryOne('SELECT * FROM api_keys WHERE id = ? AND workspace_id = ?', [id, workspaceId]);
+  const row = await selectOne('api_keys', '*', { id, workspace_id: workspaceId });
   if (!row) throw AppError.notFound('API key not found');
   return mapApiKey(row);
 }
 
 /** Revokes a key. It is kept (not deleted) so usage history stays auditable. */
 export async function revokeApiKey(workspaceId, id) {
-  const result = await execute(
-    'UPDATE api_keys SET revoked_at = NOW() WHERE id = ? AND workspace_id = ? AND revoked_at IS NULL',
-    [id, workspaceId],
-  );
-  if (!result.affectedRows) {
+  const result = await updateRows('api_keys', { revoked_at: new Date().toISOString() }, {
+    id,
+    workspace_id: workspaceId,
+    revoked_at: null,
+  });
+  if (!result.length) {
     throw AppError.notFound('API key not found or already revoked');
   }
   return getApiKeyById(workspaceId, id);
@@ -129,25 +120,14 @@ export async function authenticateApiKey(raw) {
     return null;
   }
 
-  const row = await queryOne(
-    `SELECT k.*, w.name AS workspace_name
-       FROM api_keys k
-       JOIN workspaces w ON w.id = k.workspace_id
-      WHERE k.key_hash = ?
-        AND k.revoked_at IS NULL
-        AND (k.expires_at IS NULL OR k.expires_at > NOW())`,
-    [hashKey(raw)],
-  );
+  const row = await callRpc('resolve_api_key', { p_key_hash: hashApiKey(raw) });
   if (!row) return null;
-
-  // Best-effort usage stamp. A failure here must not fail the request.
-  execute('UPDATE api_keys SET last_used_at = NOW() WHERE id = ?', [row.id]).catch(() => {});
 
   return {
     kind: 'api_key',
     keyId: row.id,
     workspaceId: row.workspace_id,
-    workspaceName: row.workspace_name,
+    workspaceName: row.workspaces?.name,
     scopes: parseScopes(row.scopes),
   };
 }
@@ -175,7 +155,7 @@ function mapApiKey(row) {
   };
 }
 
-/** MySQL JSON columns come back parsed, but be defensive about both forms. */
+/** PostgreSQL JSONB values are parsed, but be defensive about both forms. */
 function parseScopes(value) {
   if (Array.isArray(value)) return value;
   try {

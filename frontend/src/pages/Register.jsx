@@ -15,6 +15,7 @@ export default function Register() {
     workspaceName: '',
   });
   const [error, setError] = useState(null);
+  const [notice, setNotice] = useState(null);
   const [submitting, setSubmitting] = useState(false);
 
   if (!booting && user) return <Navigate to="/" replace />;
@@ -22,6 +23,7 @@ export default function Register() {
   const onSubmit = async (event) => {
     event.preventDefault();
     setError(null);
+    setNotice(null);
     setSubmitting(true);
     try {
       // Register creates the user, their first workspace and an owner
@@ -36,6 +38,11 @@ export default function Register() {
         },
         { auth: false },
       );
+
+      if (data.confirmationRequired) {
+        setNotice(data.message || `Check ${data.email} to confirm your email, then sign in.`);
+        return;
+      }
 
       tokens.save({
         accessToken: data.tokens?.accessToken ?? data.accessToken,
@@ -70,6 +77,11 @@ export default function Register() {
           {error && (
             <Alert tone="error" className="mt-5">
               {error}
+            </Alert>
+          )}
+          {notice && (
+            <Alert tone="info" className="mt-5">
+              {notice}
             </Alert>
           )}
 
