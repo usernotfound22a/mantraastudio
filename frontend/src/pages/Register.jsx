@@ -67,7 +67,7 @@ export default function Register() {
       <div className="w-full max-w-md">
         <div className="mb-6 flex items-center justify-center gap-3">
           <img src="/socialhub-icon.png" alt="" className="h-11 w-11 shrink-0 rounded-xl object-contain" />
-          <span className="text-xl font-semibold tracking-tight text-slate-900">SocialHub</span>
+          <span className="text-xl font-semibold tracking-tight text-slate-900">Mantraa Studio</span>
         </div>
 
         <div className="card p-6">

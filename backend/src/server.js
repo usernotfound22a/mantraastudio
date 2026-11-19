@@ -63,7 +63,7 @@ async function start() {
         cors: env.CORS_ORIGINS,
         health: `http://localhost:${env.PORT}/api/health`,
       },
-      `SocialHub API listening on http://localhost:${env.PORT}`,
+      `Mantraa Studio API listening on http://localhost:${env.PORT}`,
     );
   });
 

@@ -1,0 +1,15 @@
+[build]
+  base = "frontend"
+  command = "npm install && npm run build"
+  publish = "dist"
+
+[build.environment]
+  VITE_API_URL = "https://socialhub-c2r8vuvod-usernotfound22as-projects.vercel.app/api"
+  VITE_SOCKET_URL = "https://socialhub-c2r8vuvod-usernotfound22as-projects.vercel.app"
+  VITE_SUPABASE_URL = "https://ypbliufjnbaqzpsnpadx.supabase.co"
+  VITE_SUPABASE_PUBLISHABLE_KEY = "sb_publishable_FdniulWzpOLasRnkDZDcxw_HApsRguj"
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

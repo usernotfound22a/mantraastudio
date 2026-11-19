@@ -81,7 +81,7 @@ export default function AppShell() {
             alt=""
             className="h-9 w-9 shrink-0 rounded-xl object-contain"
           />
-          <span className="text-base font-semibold tracking-tight text-white">SocialHub</span>
+          <span className="text-base font-semibold tracking-tight text-white">Mantraa Studio</span>
           <button
             type="button"
             aria-label="Close navigation"
@@ -171,7 +171,7 @@ export default function AppShell() {
             </button>
             <div className="min-w-0">
             <h1 className="truncate text-sm font-semibold text-slate-900">
-              {activeWorkspace?.name ?? 'SocialHub'}
+              {activeWorkspace?.name ?? 'Mantraa Studio'}
             </h1>
             {activeWorkspace?.slug && (
               <p className="truncate text-xs text-slate-500">{activeWorkspace.slug}.socialhub.app</p>

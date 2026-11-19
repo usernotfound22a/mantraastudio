@@ -174,7 +174,7 @@ export function createApp() {
   // --- Routes -----------------------------------------------------------
   app.get('/', (req, res) => {
     res.json({
-      name: 'SocialHub API',
+      name: 'Mantraa Studio API',
       version: '1.0.0',
       docs: 'See /api/health and backend/README.md',
       workspaceHint: 'Tenant routes require the X-Workspace-Id header.',

@@ -248,7 +248,7 @@ function InviteModal({ onClose, onDone }) {
       open
       onClose={onClose}
       title="Add a team member"
-      description="They need an existing SocialHub account. Invitations are not sent by email yet."
+      description="They need an existing Mantraa Studio account. Invitations are not sent by email yet."
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>
