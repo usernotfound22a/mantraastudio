@@ -1,6 +1,7 @@
 import {
   createUserClient,
   getSupabaseClient,
+  getAdminClient,
   withSupabaseClient,
   callRpc,
   selectOne,
@@ -70,25 +71,27 @@ function authError(error, fallback) {
 
 /** Create a Supabase Auth account and atomically bootstrap its first workspace. */
 export async function register({ email, password, fullName, workspaceName }) {
-  const client = createUserClient();
-  const { data, error } = await client.auth.signUp({
+  const adminClient = getAdminClient();
+  const { data, error } = await adminClient.auth.admin.createUser({
     email,
     password,
-    options: { data: { full_name: fullName, workspace_name: workspaceName } },
+    email_confirm: true,
+    user_metadata: { full_name: fullName, workspace_name: workspaceName },
   });
   if (error) throw authError(error, 'Could not create an account');
   if (!data.user) throw AppError.badRequest('Could not create an account');
-  if (!data.session) {
-    return {
-      confirmationRequired: true,
-      email: data.user.email,
-      message: 'Confirm your email, then sign in to finish setting up your workspace.',
-    };
+
+  const { data: signInData, error: signInError } = await createUserClient().auth.signInWithPassword({
+    email,
+    password,
+  });
+  if (signInError || !signInData?.session || !signInData?.user) {
+    throw authError(signInError, 'Could not create an account');
   }
 
-  const sessionClient = createUserClient(data.session.access_token);
+  const sessionClient = createUserClient(signInData.session.access_token);
   const profile = await withSupabaseClient(sessionClient, () =>
-    profileForAuthUser(data.user),
+    profileForAuthUser(signInData.user),
   );
   const memberships = await withSupabaseClient(sessionClient, () =>
     listMembershipsForUser(profile.id),
@@ -98,7 +101,7 @@ export async function register({ email, password, fullName, workspaceName }) {
   return {
     user: publicUser(profile),
     workspaces: memberships.map(mapMembership),
-    tokens: sessionTokens(data.session),
+    tokens: sessionTokens(signInData.session),
   };
 }
 
