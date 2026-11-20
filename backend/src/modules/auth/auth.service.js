@@ -66,6 +66,10 @@ function authError(error, fallback) {
     return AppError.unauthorized(fallback);
   }
   if (error?.status === 422) return AppError.conflict(error.message);
+  if (error?.status === 429) return AppError.tooManyRequests('Too many attempts. Please try again shortly.');
+  if (error?.status >= 500) {
+    return AppError.serviceUnavailable('Authentication service is unavailable. Please try again.');
+  }
   return error ?? AppError.unauthorized(fallback);
 }
 

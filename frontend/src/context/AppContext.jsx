@@ -97,9 +97,10 @@ export function AppProvider({ children }) {
   }, []);
 
   const signInWithGoogle = useCallback(async () => {
+    const siteUrl = (import.meta.env.VITE_SITE_URL || window.location.origin).replace(/\/$/, '');
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
-      options: { redirectTo: `${window.location.origin}/auth/callback` },
+      options: { redirectTo: `${siteUrl}/auth/callback` },
     });
     if (error) throw error;
   }, []);

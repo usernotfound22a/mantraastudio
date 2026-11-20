@@ -10,6 +10,9 @@ export default function AuthCallback() {
   useEffect(() => {
     (async () => {
       try {
+        const params = new URLSearchParams(window.location.search);
+        const oauthError = params.get('error_description') || params.get('error');
+        if (oauthError) throw new Error(oauthError);
         await completeOAuth();
         navigate('/', { replace: true });
       } catch (err) {

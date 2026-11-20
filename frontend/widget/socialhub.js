@@ -40,10 +40,7 @@
       }
     }
 
-    // 3. Vite dev server: the widget is loaded from :5173 but the API is :4000.
-    if (location.port === '5173') return 'http://localhost:4000/api';
-
-    // 4. Production: the API is exposed through the shared origin's /api path.
+    // 3. Production: the API is exposed through the shared origin's /api path.
     return location.origin + '/api';
   })();
 
