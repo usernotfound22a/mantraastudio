@@ -29,7 +29,6 @@ export const META_SCOPES = [
   'pages_show_list',
   'pages_messaging',
   'pages_manage_metadata',
-  'pages_manage_posts',
   'pages_read_engagement',
   'instagram_basic',
   'instagram_manage_messages',

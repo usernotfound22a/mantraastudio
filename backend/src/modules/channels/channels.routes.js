@@ -473,7 +473,7 @@ router.post(
               name: pageName ?? page.name,
               accessToken: pageToken,
               tokenExpiresAt: expiresAt?.toISOString() ?? null,
-              scopes: ['pages_show_list', 'pages_read_engagement', 'pages_manage_posts', 'pages_manage_engagement', 'pages_messaging'],
+              scopes: ['pages_show_list', 'pages_read_engagement', 'pages_manage_engagement', 'pages_messaging'],
               status: 'connected',
               connectedBy: req.user.id,
               metadata: { pageId: page.id, pageName: page.name },
