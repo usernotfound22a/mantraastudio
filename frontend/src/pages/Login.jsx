@@ -1,6 +1,6 @@
 /** Login screen. */
 import { useState } from 'react';
-import { Navigate, useLocation, useNavigate } from 'react-router-dom';
+import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { useApp } from '../context/AppContext.jsx';
 import { Button, Input, Alert } from '../components/ui.jsx';
 
@@ -107,6 +107,10 @@ export default function Login() {
           >
             Continue with Google
           </Button>
+
+          <Link to="/register" className="mt-4 block text-center text-sm font-medium text-brand-700 hover:underline">
+            New here? Create an account
+          </Link>
 
           <div className="mt-6 rounded-lg bg-slate-50 p-3 text-xs text-slate-600">
             <p className="font-medium text-slate-700">Demo workspace</p>
