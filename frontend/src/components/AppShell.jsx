@@ -77,7 +77,7 @@ export default function AppShell() {
       >
         <div className="flex items-center gap-2 px-5 py-5">
           <img
-            src="/socialhub-icon.png"
+            src="/mantraastudio-logo.png"
             alt=""
             className="h-9 w-9 shrink-0 rounded-xl object-contain"
           />
