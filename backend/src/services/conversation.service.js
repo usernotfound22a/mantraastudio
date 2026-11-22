@@ -103,7 +103,7 @@ export async function listConversations(workspaceId, filters = {}) {
   const limitParam = Math.min(Number(limit) || 30, 100);
   let request = getSupabaseClient()
     .from('conversations')
-    .select('*,channels(type,name),users!conversations_assignee_id_fkey(full_name,avatar_url)')
+    .select('*,channels(type,name),users!fk_conv_assignee(full_name,avatar_url)')
     .eq('workspace_id', workspaceId);
   if (status) request = request.eq('status', status);
   if (channelType) request = request.eq('channels.type', channelType);

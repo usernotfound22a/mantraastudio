@@ -13,7 +13,7 @@ import { api } from '../lib/api.js';
 import { useApp } from '../context/AppContext.jsx';
 import { watchConversation, unwatchConversation } from '../lib/realtime.js';
 import { CHANNEL_LABELS, handoverLabel, relativeTime, truncate } from '../lib/format.js';
-import { Avatar, Badge, Button, EmptyState, Skeleton, cx } from './ui.jsx';
+import { Badge, Button, EmptyState, Skeleton, cx } from './ui.jsx';
 import { AlertIcon, InboxIcon, SearchIcon, SparkIcon } from './Icons.jsx';
 import MessageThread from './MessageThread.jsx';
 import CustomerPanel from './CustomerPanel.jsx';
@@ -291,7 +291,6 @@ function ConversationRow({ conversation, active, onSelect }) {
         active ? 'bg-brand-50' : 'hover:bg-slate-50',
       )}
     >
-      <Avatar name={contact?.name} src={contact?.avatarUrl} />
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline justify-end gap-2">
           <span className="shrink-0 text-[11px] text-slate-400">{relativeTime(conversation.lastMessageAt)}</span>

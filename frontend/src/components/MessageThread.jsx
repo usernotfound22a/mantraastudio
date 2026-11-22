@@ -11,7 +11,7 @@ import { api } from '../lib/api.js';
 import { useApp } from '../context/AppContext.jsx';
 import { sendTyping } from '../lib/realtime.js';
 import { CHANNEL_LABELS, dayLabel, clockTime, handoverLabel, truncate, INTENT_LABELS } from '../lib/format.js';
-import { Alert, Avatar, Badge, Button, Card, EmptyState, Skeleton, Textarea, cx } from './ui.jsx';
+import { Alert, Badge, Button, Card, EmptyState, Skeleton, Textarea, cx } from './ui.jsx';
 import { AlertIcon, ChevronIcon, NoteIcon, SendIcon, SparkIcon } from './Icons.jsx';
 
 export default function MessageThread({ conversation, panelOpen, onTogglePanel, onBackToList }) {
@@ -129,7 +129,6 @@ export default function MessageThread({ conversation, panelOpen, onTogglePanel, 
         >
           <ChevronIcon className="h-4 w-4 rotate-180" />
         </Button>
-        <Avatar name={contact.name} src={contact.avatarUrl} size="sm" />
         <div className="min-w-0 flex-1">
           <p className="truncate text-xs text-slate-500">
             {CHANNEL_LABELS[conversation.channelType] ?? conversation.channelType}

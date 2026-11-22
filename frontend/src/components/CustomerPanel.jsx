@@ -6,7 +6,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../lib/api.js';
 import { useApp } from '../context/AppContext.jsx';
 import { fullDate, number, duration, INTENT_LABELS, handoverLabel, CHANNEL_LABELS } from '../lib/format.js';
-import { Avatar, Badge, Button, Select } from './ui.jsx';
+import { Badge, Button, Select } from './ui.jsx';
 import { CloseIcon, SparkIcon, AlertIcon } from './Icons.jsx';
 
 export default function CustomerPanel({ conversation, onClose }) {
@@ -60,7 +60,6 @@ export default function CustomerPanel({ conversation, onClose }) {
       <div className="space-y-4 p-4">
         {/* Customer */}
         <div className="flex items-center gap-3">
-          <Avatar name={contact.name} src={contact.avatarUrl} size="lg" />
           <div className="min-w-0">
             {contact.email && <p className="truncate text-xs text-slate-500">{contact.email}</p>}
             {contact.locale && <p className="text-[11px] text-slate-400">{contact.locale}</p>}
