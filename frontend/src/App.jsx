@@ -122,6 +122,7 @@ export default function App() {
             <Route path="/auth/callback" element={<AuthCallback />} />
             <Route path="/privacy" element={<Legal kind="privacy" />} />
             <Route path="/terms" element={<Legal kind="terms" />} />
+            <Route path="/delete-account" element={<Legal kind="deletion" />} />
 
             {/* Preview opens in its own tab, but stays inside the shell so the
                 user can see the snippet without losing their place. */}

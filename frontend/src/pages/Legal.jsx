@@ -55,6 +55,29 @@ const sections = {
       },
     ],
   },
+  deletion: {
+    title: 'Data Deletion Requests',
+    updated: 'Last updated: November 2026',
+    intro: 'You can request deletion of the data Mantraa Studio stores for your account and connected channels.',
+    blocks: [
+      {
+        heading: 'How to request',
+        body: 'Email socialhub787123@gmail.com with the subject "Data deletion request" and the email address used on your Mantraa Studio account.',
+      },
+      {
+        heading: 'What we delete',
+        body: 'We delete account details, workspace settings, connected channel configuration and stored tokens, conversations, FAQs, and analytics associated with your workspace, except where retention is required by law.',
+      },
+      {
+        heading: 'Connected platforms',
+        body: 'Disconnecting a channel in Settings > Channels removes its tokens from Mantraa Studio. You should also remove the Mantraa Studio app from your Meta account settings if you no longer want it to access your Pages.',
+      },
+      {
+        heading: 'Timeline',
+        body: 'We aim to complete verified requests within 30 days and will confirm by email when deletion is complete.',
+      },
+    ],
+  },
 };
 
 export default function Legal({ kind }) {
