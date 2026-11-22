@@ -522,6 +522,38 @@ function PagePicker({ connectToken, onDone, onCancel }) {
     onError: (error) => toast(error.message ?? 'Could not connect the Page', 'error'),
   });
 
+  const eligiblePageIds = useMemo(() => {
+    const pages = session.data?.pages ?? [];
+    const pageTypes = types.filter((type) => type !== 'whatsapp');
+    const ids = new Set();
+    for (const page of pages) {
+      for (const type of pageTypes) {
+        const supported = type === 'messenger' ? Boolean(page.hasMessenger) : Boolean(page.instagram);
+        if (supported) ids.add(page.id);
+      }
+    }
+    return [...ids];
+  }, [session.data, types]);
+
+  const connectAll = useMutation({
+    mutationFn: () =>
+      api.post('/channels/meta/connect', {
+        connectToken,
+        pageIds: eligiblePageIds,
+        types,
+        ...(types.includes('whatsapp') ? { whatsappBusinessAccountId, phoneNumberId } : {}),
+      }),
+    onSuccess: (data) => {
+      if (data.warnings?.length) {
+        toast(data.warnings[0], 'warning');
+      } else {
+        toast('Pages connected', 'success');
+      }
+      onDone();
+    },
+    onError: (error) => toast(error.message ?? 'Could not connect the Pages', 'error'),
+  });
+
   return (
     <Modal
       open
@@ -532,6 +564,14 @@ function PagePicker({ connectToken, onDone, onCancel }) {
         <>
           <Button variant="ghost" onClick={onCancel}>
             Cancel
+          </Button>
+          <Button
+            variant="secondary"
+            disabled={!types.length || eligiblePageIds.length === 0 || connectAll.isPending}
+            loading={connectAll.isPending}
+            onClick={() => connectAll.mutate()}
+          >
+            Connect all Pages
           </Button>
           <Button
             disabled={

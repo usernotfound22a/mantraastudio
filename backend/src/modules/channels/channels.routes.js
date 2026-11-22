@@ -373,6 +373,7 @@ router.post(
     body: z.object({
       connectToken: z.string().min(10),
       pageId: z.string().min(1).max(100).optional(),
+      pageIds: z.array(z.string().min(1).max(100)).max(100).optional(),
       types: z.array(z.enum(['messenger', 'instagram', 'whatsapp'])).min(1),
       whatsappBusinessAccountId: z.string().min(1).max(100).optional(),
       phoneNumberId: z.string().min(1).max(100).optional(),
@@ -380,7 +381,7 @@ router.post(
     }),
   }),
   asyncHandler(async (req, res) => {
-    const { connectToken, pageId, types, whatsappBusinessAccountId, phoneNumberId, pageName } = req.body;
+    const { connectToken, pageId, pageIds, types, whatsappBusinessAccountId, phoneNumberId, pageName } = req.body;
     const session = getConnectSession(connectToken);
 
     if (session.workspaceId !== req.workspace.id || session.userId !== req.user.id) {
@@ -388,11 +389,15 @@ router.post(
     }
 
     const socialTypes = types.filter((type) => type !== 'whatsapp');
-    const page = socialTypes.length
-      ? (session.pages ?? []).find((candidate) => candidate.id === pageId)
-      : null;
-    if (socialTypes.length && !page) {
+    const requestedPageIds = pageIds?.length ? pageIds : pageId ? [pageId] : [];
+    const targetPages = socialTypes.length
+      ? (session.pages ?? []).filter((candidate) => requestedPageIds.includes(candidate.id))
+      : [];
+    if (socialTypes.length && targetPages.length === 0) {
       throw AppError.badRequest('That Page was not in the list you authorised');
+    }
+    if (pageIds && pageIds.length && targetPages.length !== pageIds.length) {
+      throw AppError.badRequest('One of the selected Pages was not in the list you authorised');
     }
 
     const whatsappAccount = types.includes('whatsapp')
@@ -405,79 +410,81 @@ router.post(
 
     // Consume only after ownership and selected account checks pass.
     const payload = verifyConnectToken(connectToken);
-    const { token: pageToken, expiresAt } = page
-      ? await exchangeForLongLivedToken(page._pageAccessToken)
-      : { token: null, expiresAt: null };
-    const pageSubscription = page ? await subscribePageToWebhooks(pageId, pageToken) : { ok: true };
-
-    const instagram = types.includes('instagram') ? await fetchInstagramAccount(pageId, pageToken) : null;
-    if (types.includes('instagram') && !instagram) {
-      log.warn({ pageId }, 'Instagram requested but the Page has no linked Instagram business account');
-    }
-
     const created = [];
-    for (const type of socialTypes) {
-      if (type === 'instagram' && !instagram) continue;
+    const warnings = [];
 
-      const externalId = type === 'instagram' ? instagram.id : pageId;
-      const name =
-        type === 'instagram' ? `IG: ${instagram.username ?? page.name}` : (pageName ?? page.name);
+    for (const page of targetPages) {
+      const { token: pageToken, expiresAt } = await exchangeForLongLivedToken(page._pageAccessToken);
+      const pageSubscription = await subscribePageToWebhooks(page.id, pageToken);
+      if (!pageSubscription.ok) {
+        warnings.push('Could not subscribe the Facebook Page to webhooks.');
+      }
 
-      try {
-        const channel = await createChannel({
-          workspaceId: req.workspace.id,
-          type,
-          name,
-          externalId,
-          config: {
-            pageId,
-            accessToken: pageToken,
-            appSecret: getMetaSettings().appSecret ?? null,
-            verifyToken: env.META_VERIFY_TOKEN,
-            ...(type === 'instagram' ? { instagramUserId: instagram.id, username: instagram.username } : {}),
-            tokenExpiresAt: expiresAt?.toISOString() ?? null,
-            webhooksSubscribed: pageSubscription.ok,
-          },
-          connectedBy: req.user.id,
-        });
+      const instagram = types.includes('instagram') ? await fetchInstagramAccount(page.id, pageToken) : null;
+      if (types.includes('instagram') && !instagram) {
+        log.warn({ pageId: page.id }, 'Instagram requested but the Page has no linked Instagram business account');
+      }
 
-        if (type === 'instagram' && instagram) {
-          await upsertSocialAccount({
+      for (const type of socialTypes) {
+        if (type === 'instagram' && !instagram) continue;
+
+        const externalId = type === 'instagram' ? instagram.id : page.id;
+        const name = type === 'instagram' ? `IG: ${instagram.username ?? page.name}` : (pageName ?? page.name);
+
+        try {
+          const channel = await createChannel({
             workspaceId: req.workspace.id,
-            platform: 'instagram',
-            externalId: String(instagram.id),
-            name: instagram.username || instagram.name || 'Instagram business account',
-            avatarUrl: instagram.profile_pic || null,
-            accessToken: pageToken,
-            tokenExpiresAt: expiresAt?.toISOString() ?? null,
-            scopes: ['instagram_business_basic', 'instagram_business_content_publish', 'instagram_business_manage_comments', 'instagram_business_manage_messages'],
-            status: 'connected',
+            type,
+            name,
+            externalId,
+            config: {
+              pageId: page.id,
+              accessToken: pageToken,
+              appSecret: getMetaSettings().appSecret ?? null,
+              verifyToken: env.META_VERIFY_TOKEN,
+              ...(type === 'instagram' ? { instagramUserId: instagram.id, username: instagram.username } : {}),
+              tokenExpiresAt: expiresAt?.toISOString() ?? null,
+              webhooksSubscribed: pageSubscription.ok,
+            },
             connectedBy: req.user.id,
-            metadata: { pageId, pageName: page.name },
           });
-        }
 
-        if (type === 'messenger') {
-          await upsertSocialAccount({
-            workspaceId: req.workspace.id,
-            platform: 'facebook',
-            externalId: String(pageId),
-            name: pageName ?? page.name,
-            accessToken: pageToken,
-            tokenExpiresAt: expiresAt?.toISOString() ?? null,
-            scopes: ['pages_show_list', 'pages_read_engagement', 'pages_manage_posts', 'pages_manage_engagement', 'pages_messaging'],
-            status: 'connected',
-            connectedBy: req.user.id,
-            metadata: { pageId, pageName: page.name },
-          });
-        }
+          if (type === 'instagram' && instagram) {
+            await upsertSocialAccount({
+              workspaceId: req.workspace.id,
+              platform: 'instagram',
+              externalId: String(instagram.id),
+              name: instagram.username || instagram.name || 'Instagram business account',
+              avatarUrl: instagram.profile_pic || null,
+              accessToken: pageToken,
+              tokenExpiresAt: expiresAt?.toISOString() ?? null,
+              scopes: ['instagram_business_basic', 'instagram_business_content_publish', 'instagram_business_manage_comments', 'instagram_business_manage_messages'],
+              status: 'connected',
+              connectedBy: req.user.id,
+              metadata: { pageId: page.id, pageName: page.name },
+            });
+          }
 
-        created.push(toPublicChannel(channel));
-      } catch (error) {
-        // A duplicate remote account is a normal outcome, not a crash: the user
-        // may have connected the same Page before. Skip it and keep the rest.
-        if (error.statusCode !== 409) throw error;
-        created.push({ error: error.message, type, externalId });
+          if (type === 'messenger') {
+            await upsertSocialAccount({
+              workspaceId: req.workspace.id,
+              platform: 'facebook',
+              externalId: String(page.id),
+              name: pageName ?? page.name,
+              accessToken: pageToken,
+              tokenExpiresAt: expiresAt?.toISOString() ?? null,
+              scopes: ['pages_show_list', 'pages_read_engagement', 'pages_manage_posts', 'pages_manage_engagement', 'pages_messaging'],
+              status: 'connected',
+              connectedBy: req.user.id,
+              metadata: { pageId: page.id, pageName: page.name },
+            });
+          }
+
+          created.push(toPublicChannel(channel));
+        } catch (error) {
+          if (error.statusCode !== 409) throw error;
+          created.push({ error: error.message, type, externalId });
+        }
       }
     }
 
@@ -519,10 +526,7 @@ router.post(
     res.status(201).json({
       channels: created,
       // Surfaced so the settings screen can tell the user what to do next.
-      warnings: [
-        ...(!pageSubscription.ok ? ['Could not subscribe the Facebook Page to webhooks.'] : []),
-        ...(!whatsappSubscription.ok ? ['Could not subscribe the WhatsApp Business Account to webhooks.'] : []),
-      ],
+      warnings,
     });
   }),
 );
