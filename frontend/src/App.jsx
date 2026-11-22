@@ -29,6 +29,7 @@ import ApiKeys from './pages/ApiKeys.jsx';
 import Webhooks from './pages/Webhooks.jsx';
 import Plugins from './pages/Plugins.jsx';
 import WidgetDemo from './pages/WidgetDemo.jsx';
+import Legal from './pages/Legal.jsx';
 import NotFound from './pages/NotFound.jsx';
 
 const queryClient = new QueryClient({
@@ -119,6 +120,8 @@ export default function App() {
             <Route path="/login" element={<PublicOnly><Login /></PublicOnly>} />
             <Route path="/register" element={<PublicOnly><Register /></PublicOnly>} />
             <Route path="/auth/callback" element={<AuthCallback />} />
+            <Route path="/privacy" element={<Legal kind="privacy" />} />
+            <Route path="/terms" element={<Legal kind="terms" />} />
 
             {/* Preview opens in its own tab, but stays inside the shell so the
                 user can see the snippet without losing their place. */}
