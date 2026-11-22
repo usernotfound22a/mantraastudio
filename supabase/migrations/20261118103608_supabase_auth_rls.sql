@@ -1006,8 +1006,8 @@ REVOKE ALL ON FUNCTION public.lookup_widget_channel(TEXT) FROM PUBLIC, authentic
 REVOKE ALL ON FUNCTION public.poll_widget_messages(TEXT, TEXT, BIGINT) FROM PUBLIC, authenticated;
 GRANT EXECUTE ON FUNCTION public.join_workspace(TEXT, TEXT) TO authenticated;
 GRANT EXECUTE ON FUNCTION public.resolve_api_key(TEXT) TO anon, service_role;
-GRANT EXECUTE ON FUNCTION public.lookup_widget_channel(TEXT) TO anon;
-GRANT EXECUTE ON FUNCTION public.poll_widget_messages(TEXT, TEXT, BIGINT) TO anon;
+GRANT EXECUTE ON FUNCTION public.lookup_widget_channel(TEXT) TO anon, service_role;
+GRANT EXECUTE ON FUNCTION public.poll_widget_messages(TEXT, TEXT, BIGINT) TO anon, service_role;
 
 ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.system_settings ENABLE ROW LEVEL SECURITY;
@@ -1034,6 +1034,36 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON
 TO authenticated;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO authenticated;
 REVOKE ALL ON public.system_settings FROM anon, authenticated;
+
+DO $$
+DECLARE
+  policy_row RECORD;
+BEGIN
+  FOR policy_row IN
+    SELECT schemaname, tablename, policyname
+    FROM pg_policies
+    WHERE schemaname = 'public'
+      AND policyname IN (
+        'users_select_related', 'users_update_self', 'users_select_api_key_sender',
+        'workspaces_select_member', 'workspaces_update_admin', 'workspaces_delete_owner',
+        'workspace_members_select_member', 'workspace_members_insert_admin',
+        'workspace_members_update_admin', 'workspace_members_delete_admin',
+        'workspace_members_select_api_key', 'faqs_select_member', 'faqs_mutate_admin',
+        'faqs_select_api_key', 'channels_select_member', 'channels_mutate_admin',
+        'channels_select_api_key', 'social_accounts_select_member',
+        'social_accounts_mutate_admin', 'conversations_member_access',
+        'conversations_select_api_key', 'conversations_update_api_key',
+        'messages_member_access', 'messages_select_api_key', 'messages_insert_api_key',
+        'notes_member_access', 'message_feedback_member_access',
+        'unanswered_questions_member_access', 'subscriptions_select_member',
+        'subscriptions_mutate_admin', 'api_keys_select_admin', 'api_keys_mutate_admin',
+        'webhook_endpoints_admin_access', 'webhook_deliveries_select_member',
+        'system_settings_deny_client_access'
+      )
+  LOOP
+    EXECUTE format('DROP POLICY %I ON %I.%I', policy_row.policyname, policy_row.schemaname, policy_row.tablename);
+  END LOOP;
+END $$;
 
 CREATE POLICY users_select_related ON public.users
   FOR SELECT TO authenticated
@@ -1213,7 +1243,7 @@ BEGIN
     FROM public.channels AS ch
     WHERE ch.id = p_channel_id
       AND ch.workspace_id = p_workspace_id
-      AND ch.status = 'active'
+      AND ch.status IN ('active', 'connected')
       AND EXISTS (
         SELECT 1 FROM public.conversations AS c
         WHERE c.id = p_conversation_id

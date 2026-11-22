@@ -278,8 +278,8 @@ try {
   await new Promise((resolve) => server.close(resolve));
   await withSupabaseClient(getAdminClient(), async () => {
     const client = getAdminClient();
-    await client.from('api_keys').delete().like('name', 'verify-%').catch(() => {});
-    await client.from('webhook_endpoints').delete().like('description', '%verify%').catch(() => {});
+    try { await client.from('api_keys').delete().like('name', 'verify-%'); } catch {}
+    try { await client.from('webhook_endpoints').delete().like('description', '%verify%'); } catch {}
   });
 }
 

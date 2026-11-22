@@ -72,7 +72,7 @@ export async function createApiKey({ workspaceId, name, scopes, createdBy = null
     workspace_id: workspaceId,
     name,
     key_prefix: keyPrefix(secret),
-    key_hash: hashKey(secret),
+    key_hash: hashApiKey(secret),
     scopes: granted,
     created_by: createdBy,
     expires_at: expiresAt,

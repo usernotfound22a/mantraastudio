@@ -17,7 +17,7 @@
  * with the frontend.
  */
 import { Server } from 'socket.io';
-import { createUserClient, withSupabaseClient, selectOne } from '../db/supabase.js';
+import { createUserClient, getAdminClient, withSupabaseClient, selectOne } from '../db/supabase.js';
 import { findMembership } from './membership.service.js';
 import { env } from '../config/env.js';
 import { childLogger } from '../config/logger.js';
@@ -213,7 +213,9 @@ export function emitToWorkspace(workspaceId, event, payload) {
   // Imported lazily to avoid a circular import at module load time
   // (webhook.service -> db, crypto; socket.service is imported by events).
   import('./webhook.service.js')
-    .then(({ dispatchEvent }) => dispatchEvent(workspaceId, event, payload))
+    .then(({ dispatchEvent }) =>
+      withSupabaseClient(getAdminClient(), () => dispatchEvent(workspaceId, event, payload)),
+    )
     .catch((err) => log.error({ err: err.message, event }, 'webhook dispatch failed'));
 }
 

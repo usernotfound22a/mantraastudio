@@ -123,6 +123,8 @@ const NO_AUTH_OK = [
   '/api/auth/register',
   '/api/auth/login',
   '/api/auth/refresh',
+  // The OAuth callback exchanges a Supabase token in the request body.
+  '/api/auth/oauth',
   // Facebook redirects the browser here; a top-level navigation sends no
   // Authorization header, so the signed state token is the CSRF defence.
   '/api/channels/meta/oauth/callback',
@@ -137,7 +139,7 @@ const NO_WORKSPACE_OK = [
   '/api/channels/meta/instagram/oauth/callback',
 ];
 /** Writes whose input is not a JSON body. */
-const NO_SCHEMA_OK = ['/api/auth/logout', '/api/uploads/attachment'];
+const NO_SCHEMA_OK = ['/api/auth/logout', '/api/auth/oauth', '/api/uploads/attachment'];
 const PUBLIC_PREFIXES = ['/api/health', '/api/webhooks', '/api/widget'];
 
 const tenant = rows.filter(
