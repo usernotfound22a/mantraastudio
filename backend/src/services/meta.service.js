@@ -44,6 +44,29 @@ export function appSecretProof(accessToken, appSecret = getMetaSettings().appSec
   return crypto.createHmac('sha256', appSecret).update(accessToken).digest('hex');
 }
 
+export function verifyMetaSignedRequest(signedRequest) {
+  if (typeof signedRequest !== 'string' || !signedRequest.includes('.')) {
+    throw AppError.badRequest('Missing or invalid signed_request');
+  }
+
+  const [encodedSignature, encodedPayload] = signedRequest.split('.');
+  const appSecret = getMetaSettings().appSecret;
+  if (!appSecret) {
+    throw AppError.serviceUnavailable('Meta App Secret is not configured');
+  }
+
+  try {
+    const expected = crypto.createHmac('sha256', appSecret).update(encodedPayload).digest();
+    const received = Buffer.from(encodedSignature, 'base64url');
+    if (received.length !== expected.length || !crypto.timingSafeEqual(received, expected)) {
+      throw new Error('signature mismatch');
+    }
+    return JSON.parse(Buffer.from(encodedPayload, 'base64url').toString('utf8'));
+  } catch {
+    throw AppError.badRequest('Invalid Meta signed_request');
+  }
+}
+
 export function withAppSecretProof(accessToken, params = {}) {
   const proof = appSecretProof(accessToken);
   return {

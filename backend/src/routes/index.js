@@ -6,6 +6,7 @@
  */
 import { Router } from 'express';
 import { asyncHandler } from '../middleware/error.js';
+import { childLogger } from '../config/logger.js';
 import { pingSupabase } from '../db/supabase.js';
 import authRoutes from '../modules/auth/auth.routes.js';
 import workspaceRoutes from '../modules/workspaces/workspaces.routes.js';
@@ -17,8 +18,10 @@ import analyticsRoutes from '../modules/analytics/analytics.routes.js';
 import billingRoutes from '../modules/billing/billing.routes.js';
 import apiKeyRoutes from '../modules/apikeys/apikeys.routes.js';
 import pluginRoutes from '../modules/plugins/plugins.routes.js';
+import { verifyMetaSignedRequest } from '../services/meta.service.js';
 
 const router = Router();
+const log = childLogger('meta-deauthorize');
 
 /**
  * GET /api/health
@@ -44,6 +47,15 @@ router.get(
       version: process.env.npm_package_version ?? '1.0.0',
       timestamp: new Date().toISOString(),
     });
+  }),
+);
+
+router.post(
+  '/meta/deauthorize',
+  asyncHandler(async (req, res) => {
+    const payload = verifyMetaSignedRequest(req.body?.signed_request);
+    log.info({ metaUserId: payload.user_id ?? null }, 'Meta deauthorization received');
+    res.json({ received: true });
   }),
 );
 
