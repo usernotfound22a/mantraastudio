@@ -62,7 +62,6 @@ export default function CustomerPanel({ conversation, onClose }) {
         <div className="flex items-center gap-3">
           <Avatar name={contact.name} src={contact.avatarUrl} size="lg" />
           <div className="min-w-0">
-            <p className="truncate text-sm font-semibold text-slate-900">{contact.name}</p>
             {contact.email && <p className="truncate text-xs text-slate-500">{contact.email}</p>}
             {contact.locale && <p className="text-[11px] text-slate-400">{contact.locale}</p>}
           </div>

@@ -293,10 +293,7 @@ function ConversationRow({ conversation, active, onSelect }) {
     >
       <Avatar name={contact?.name} src={contact?.avatarUrl} />
       <div className="min-w-0 flex-1">
-        <div className="flex items-baseline justify-between gap-2">
-          <p className={cx('truncate text-sm', unreadCount > 0 ? 'font-semibold text-slate-900' : 'font-medium text-slate-800')}>
-            {contact?.name ?? 'Unknown customer'}
-          </p>
+        <div className="flex items-baseline justify-end gap-2">
           <span className="shrink-0 text-[11px] text-slate-400">{relativeTime(conversation.lastMessageAt)}</span>
         </div>
 

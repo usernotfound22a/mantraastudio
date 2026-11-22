@@ -131,7 +131,6 @@ export default function MessageThread({ conversation, panelOpen, onTogglePanel, 
         </Button>
         <Avatar name={contact.name} src={contact.avatarUrl} size="sm" />
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-semibold text-slate-900">{contact.name}</p>
           <p className="truncate text-xs text-slate-500">
             {CHANNEL_LABELS[conversation.channelType] ?? conversation.channelType}
             {contact.email ? ` · ${contact.email}` : ''}
