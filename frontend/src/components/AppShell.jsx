@@ -79,7 +79,7 @@ export default function AppShell() {
           <img
             src="/mantraastudio-logo.png"
             alt=""
-            className="h-9 w-9 shrink-0 rounded-xl object-contain"
+            className="h-9 w-9 shrink-0 rounded-xl object-contain invert"
           />
           <span className="text-base font-semibold tracking-tight text-white">Mantraa Studio</span>
           <button
