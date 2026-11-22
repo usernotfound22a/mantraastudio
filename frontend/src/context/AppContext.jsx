@@ -109,11 +109,19 @@ export function AppProvider({ children }) {
     const { data } = await supabase.auth.getSession();
     const session = data?.session;
     if (!session?.access_token) throw new Error('No OAuth session');
-    const response = await fetch('/api/auth/oauth', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${session.access_token}` },
-    });
-    if (!response.ok) throw new Error('Could not complete Google sign-in');
+    let response;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      response = await fetch('/api/auth/oauth', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${session.access_token}` },
+      });
+      if (response.status < 500 || attempt === 1) break;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+    if (!response.ok) {
+      const body = await response.json().catch(() => null);
+      throw new Error(body?.error?.message ?? 'Could not complete Google sign-in');
+    }
     const result = await response.json();
     // api.post signature? fallback
     tokens.save({

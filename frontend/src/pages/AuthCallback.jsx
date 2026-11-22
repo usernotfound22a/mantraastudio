@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useApp } from '../context/AppContext.jsx';
 
@@ -6,9 +6,12 @@ export default function AuthCallback() {
   const { completeOAuth } = useApp();
   const navigate = useNavigate();
   const [error, setError] = useState(null);
+  const startedRef = useRef(false);
 
   useEffect(() => {
     (async () => {
+      if (startedRef.current) return;
+      startedRef.current = true;
       try {
         const params = new URLSearchParams(window.location.search);
         const oauthError = params.get('error_description') || params.get('error');
