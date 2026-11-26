@@ -23,7 +23,7 @@ import { z } from 'zod';
 import { queryOf, validate } from '../../middleware/validate.js';
 import { AppError, asyncHandler } from '../../middleware/error.js';
 import { publicLimiter } from '../../middleware/rateLimit.js';
-import { callRpc } from '../../db/supabase.js';
+import { callRpc, selectOne } from '../../db/supabase.js';
 import { createAdapterForChannel } from '../../adapters/index.js';
 import { findWebsiteChannelByWidgetKey } from '../../services/channels.service.js';
 import { ingestInboundMessage, mapMessage } from '../../services/conversation.service.js';
@@ -100,7 +100,8 @@ async function resolveWidget({ widgetKey, headers }) {
   const adapter = createAdapterForChannel(channel, { id: channel.workspace_id });
   adapter.verifyWebhook({ headers });
 
-  return { channel, adapter, workspace: { id: channel.workspace_id } };
+  const workspace = await selectOne('workspaces', '*', { id: channel.workspace_id });
+  return { channel, adapter, workspace };
 }
 
 // ---------------------------------------------------------------------------
@@ -177,7 +178,7 @@ router.post(
     res.status(201).json({
       conversationId: conversation.id,
       message: mapMessage(stored),
-      ai: { action: aiResult.action, reply: aiResult.message ?? null },
+      ai: { action: aiResult.action, reply: aiResult.reply ?? null },
     });
   }),
 );

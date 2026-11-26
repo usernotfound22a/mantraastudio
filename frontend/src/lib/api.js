@@ -11,6 +11,8 @@
  * instead of each firing their own refresh (which would race and, with rotating
  * refresh tokens, invalidate itself).
  */
+import { supabase } from './supabase.js';
+
 const BASE = import.meta.env.VITE_API_URL ?? '/api';
 
 const ACCESS_KEY = 'socialhub.accessToken';
@@ -32,6 +34,11 @@ export const tokens = {
     if (accessToken) localStorage.setItem(ACCESS_KEY, accessToken);
     if (refreshToken) localStorage.setItem(REFRESH_KEY, refreshToken);
     if (user) localStorage.setItem(USER_KEY, JSON.stringify(user));
+    if (accessToken && refreshToken) {
+      supabase.auth
+        .setSession({ access_token: accessToken, refresh_token: refreshToken })
+        .catch(() => {});
+    }
   },
   clear() {
     localStorage.removeItem(ACCESS_KEY);
@@ -62,7 +69,11 @@ async function refreshAccessToken() {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ refreshToken }),
     });
-    if (!response.ok) return false;
+    if (!response.ok) {
+      tokens.clear();
+      window.dispatchEvent(new CustomEvent('socialhub:auth-expired'));
+      return false;
+    }
 
     const data = await response.json();
     tokens.save({ accessToken: data.accessToken, refreshToken: data.refreshToken });

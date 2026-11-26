@@ -29,7 +29,7 @@ import {
   mapConversationSummary,
 } from '../../services/conversation.service.js';
 import { selectAllRows } from '../../db/supabase.js';
-import { syncMessengerInboxForWorkspace } from '../../services/meta-inbox-sync.service.js';
+import { syncMetaInboxesForWorkspace } from '../../services/meta-inbox-sync.service.js';
 import messageRoutes from '../messages/messages.routes.js';
 import noteRoutes from '../notes/notes.routes.js';
 
@@ -77,7 +77,7 @@ router.get(
   }),
   asyncHandler(async (req, res) => {
     const { status, channelType, assigneeId, search, unreadOnly, limit, cursor } = queryOf(req);
-    await syncMessengerInboxForWorkspace(req.workspace.id);
+    await syncMetaInboxesForWorkspace(req.workspace.id);
     const result = await listConversations(req.workspace.id, {
       status,
       channelType,

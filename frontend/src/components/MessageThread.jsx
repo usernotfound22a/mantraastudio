@@ -24,6 +24,8 @@ export default function MessageThread({ conversation, panelOpen, onTogglePanel, 
     queryKey: messagesKey,
     queryFn: () => api.get(`/conversations/${conversationId}/messages?limit=50`),
     enabled: Boolean(conversationId),
+    refetchInterval: 5_000,
+    refetchIntervalInBackground: true,
   });
 
   const messages = useMemo(() => data?.messages ?? [], [data]);

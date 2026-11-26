@@ -26,6 +26,7 @@ import {
   createAdapterForType,
   createAdapterForChannel,
 } from '../../adapters/index.js';
+import { selectOne } from '../../db/supabase.js';
 import { findChannelByExternalId } from '../../services/channels.service.js';
 import { ingestInboundMessage } from '../../services/conversation.service.js';
 import { maybeAutoReply } from '../../services/ai.service.js';
@@ -169,7 +170,7 @@ router.post(
       return res.sendStatus(200);
     }
 
-    const workspace = { id: channel.workspace_id };
+    const workspace = await selectOne('workspaces', '*', { id: channel.workspace_id });
 
     // --- Step 4: the real, fully-configured adapter ---------------------
     const adapter = createAdapterForChannel(channel, workspace);

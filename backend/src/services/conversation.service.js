@@ -22,6 +22,7 @@ import { AppError } from '../middleware/error.js';
 import { childLogger } from '../config/logger.js';
 import { createAdapterForChannel } from '../adapters/factory.js';
 import { emitToWorkspace } from './socket.service.js';
+import { broadcastInboundMessage } from './message-broadcast.service.js';
 import { EVENTS } from './events.js';
 import { incrementUsage } from './subscription.service.js';
 
@@ -258,6 +259,8 @@ export async function ingestInboundMessage({ channel, payload }) {
     log.warn({ err: error.message }, 'Usage counter update failed'),
   );
 
+  const clientMessage = mapMessage(messageRow);
+
   emitToWorkspace(channel.workspace_id, EVENTS.CONVERSATION_UPSERTED, {
     conversation: mapConversationSummary({
       ...conversation,
@@ -270,8 +273,9 @@ export async function ingestInboundMessage({ channel, payload }) {
   });
   emitToWorkspace(channel.workspace_id, EVENTS.MESSAGE_NEW, {
     conversationId: conversation.id,
-    message: mapMessage(messageRow),
+    message: clientMessage,
   });
+  broadcastInboundMessage(channel.workspace_id, clientMessage).catch(() => {});
 
   return { conversation, message: messageRow, duplicate: false };
 }

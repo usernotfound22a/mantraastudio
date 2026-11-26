@@ -50,6 +50,8 @@ export default function Inbox() {
     queryKey: listKey,
     queryFn: () => api.get(`/conversations?${params}`),
     enabled: Boolean(activeWorkspaceId),
+    refetchInterval: 5_000,
+    refetchIntervalInBackground: true,
   });
 
   const conversations = useMemo(() => data?.conversations ?? [], [data]);

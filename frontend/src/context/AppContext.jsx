@@ -7,9 +7,12 @@
  * about in one place.
  */
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
 import { api, tokens, getActiveWorkspaceId, setActiveWorkspaceId } from '../lib/api.js';
 import { connect, subscribe, disconnect, clearListeners, on, EVENTS } from '../lib/realtime.js';
 import { supabase } from '../lib/supabase.js';
+import { subscribeToMessageBroadcast } from '../lib/message-broadcast.js';
 
 const AppContext = createContext(null);
 
@@ -20,6 +23,8 @@ export function AppProvider({ children }) {
   const [booting, setBooting] = useState(Boolean(tokens.access));
   const [live, setLive] = useState(false);
   const [toasts, setToasts] = useState([]);
+  const queryClient = useQueryClient();
+  const navigate = useNavigate();
 
   const toast = useCallback((message, tone = 'info') => {
     const id = Math.random().toString(36).slice(2);
@@ -79,6 +84,19 @@ export function AppProvider({ children }) {
       socket.off('disconnect', onDisconnect);
     };
   }, [user, activeWorkspaceId]);
+
+  useEffect(() => {
+    if (!user || !activeWorkspaceId) return undefined;
+
+    return subscribeToMessageBroadcast(activeWorkspaceId, ({ payload }) => {
+      const conversationId = payload?.message?.conversationId;
+      queryClient.invalidateQueries({ queryKey: ['conversations', activeWorkspaceId] });
+      if (conversationId) {
+        queryClient.invalidateQueries({ queryKey: ['messages', conversationId] });
+        queryClient.invalidateQueries({ queryKey: ['conversation', conversationId] });
+      }
+    });
+  }, [user, activeWorkspaceId, queryClient]);
 
   const signIn = useCallback(async (email, password) => {
     const data = await api.post('/auth/login', { email, password }, { auth: false });
@@ -140,6 +158,7 @@ export function AppProvider({ children }) {
   const signOut = useCallback(() => {
     clearListeners();
     disconnect();
+    supabase.auth.signOut().catch(() => {});
     tokens.clear();
     setActiveWorkspaceId(null);
     setUser(null);
@@ -147,6 +166,15 @@ export function AppProvider({ children }) {
     setActive(null);
     setLive(false);
   }, []);
+
+  useEffect(() => {
+    const onExpired = () => {
+      signOut();
+      navigate('/login');
+    };
+    window.addEventListener('socialhub:auth-expired', onExpired);
+    return () => window.removeEventListener('socialhub:auth-expired', onExpired);
+  }, [signOut, navigate]);
 
   const switchWorkspace = useCallback(async (workspaceId) => {
     const result = await subscribe(workspaceId);
