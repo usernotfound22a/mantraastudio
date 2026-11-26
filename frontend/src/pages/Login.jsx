@@ -36,7 +36,7 @@ export default function Login() {
       {/* Marketing panel - hidden on small screens so the form gets the space. */}
       <div className="hidden w-1/2 flex-col justify-between bg-slate-900 p-10 lg:flex">
         <div className="flex items-center gap-3 text-white">
-          <img src="/mantraastudio-logo.png" alt="" className="h-11 w-11 shrink-0 rounded-xl object-contain" />
+          <img src="/mantraastudio-logo.jpeg" alt="" className="h-11 w-11 shrink-0 rounded-xl object-contain" />
           <span className="text-xl font-semibold tracking-tight">Mantraa Studio</span>
         </div>
 
@@ -62,7 +62,7 @@ export default function Login() {
       <div className="flex w-full items-center justify-center bg-white p-6 lg:w-1/2">
         <form onSubmit={onSubmit} className="w-full max-w-sm">
           <div className="mb-8 lg:hidden">
-            <img src="/mantraastudio-logo.png" alt="Mantraa Studio" className="h-12 w-12 rounded-lg object-contain" />
+            <img src="/mantraastudio-logo.jpeg" alt="Mantraa Studio" className="h-12 w-12 rounded-lg object-contain" />
           </div>
 
           <h2 className="text-xl font-semibold text-slate-900">Sign in</h2>
