@@ -121,10 +121,11 @@ async function request(path, { method = 'GET', body, auth = true, workspaceId, i
     return request(path, { method, body, auth, workspaceId, isRetry: true });
   }
 
-  throw new ApiError(payload?.message ?? `Request failed (${response.status})`, {
+  const error = payload?.error ?? payload;
+  throw new ApiError(error?.message ?? payload?.message ?? `Request failed (${response.status})`, {
     status: response.status,
-    code: payload?.code,
-    details: payload?.details,
+    code: error?.code ?? payload?.code,
+    details: error?.details ?? payload?.details,
   });
 }
 
